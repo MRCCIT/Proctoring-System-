@@ -1,0 +1,167 @@
+import fs from 'fs';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { resolveRecordingRequest, resolveSessionReportRequest } from '../services/tenant/mediaAccess.js';
+import { problemDetails, ProblemTypes } from '../utils/problemDetails.js';
+import { query } from '../config/database.js';
+import { abs, statSafe } from '../storage/localStorage.js';
+import { isUuid } from '../utils/validation.js';
+import { requireTenantContext } from '../middleware/tenantContext.js';
+
+export function registerMediaRoutes(app) {
+  app.get(
+    '/v1/media/recording',
+    asyncHandler(async (req, res) => {
+      const token = req.query.token;
+      if (!token) {
+        return res.status(400).type('application/problem+json').json(
+          problemDetails({
+            type: ProblemTypes.validation,
+            title: 'Validation Error',
+            status: 400,
+            detail: 'Query parameter "token" is required.',
+          })
+        );
+      }
+      try {
+        const row = await resolveRecordingRequest(String(token));
+        res.json({
+          data: {
+            session_id: row.id,
+            object_key: row.recording_object_key,
+            status: row.status,
+            note: 'Signed access validated. Wire CDN/object storage delivery here.',
+          },
+        });
+      } catch (e) {
+        if (e.status === 401 || e.status === 404) {
+          return res.status(e.status).type('application/problem+json').json(
+            problemDetails({
+              type: e.status === 404 ? ProblemTypes.notFound : ProblemTypes.unauthorized,
+              title: e.status === 404 ? 'Not Found' : 'Unauthorized',
+              status: e.status,
+              detail: e.message,
+            })
+          );
+        }
+        throw e;
+      }
+    })
+  );
+
+  app.get(
+    '/v1/media/recordings/:chunkId',
+    requireTenantContext,
+    asyncHandler(async (req, res) => {
+      const { chunkId } = req.params;
+      if (!/^\d+$/.test(chunkId)) {
+        return res.status(400).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 400, detail: 'Invalid chunk id' })
+        );
+      }
+      const { rows } = await query(
+        `SELECT file_path, mime_type, metadata FROM session_recording_chunks WHERE id = $1 AND tenant_id = $2`,
+        [chunkId, req.tenantContext.tenantId]
+      );
+      const row = rows[0];
+      if (!row || !row.file_path) {
+        return res.status(404).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.notFound, title: 'Not Found', status: 404, detail: 'Chunk file not stored locally' })
+        );
+      }
+      const st = statSafe(row.file_path);
+      if (!st) {
+        return res.status(410).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.notFound, title: 'Gone', status: 410, detail: 'File missing on disk' })
+        );
+      }
+      let meta = row.metadata;
+      if (typeof meta === 'string') {
+        try {
+          meta = JSON.parse(meta);
+        } catch {
+          meta = {};
+        }
+      }
+      const downloadName = meta?.display_name || `recording-${chunkId}.webm`;
+      res.setHeader('Content-Type', row.mime_type || 'video/webm');
+      res.setHeader('Content-Length', String(st.size));
+      res.setHeader('Content-Disposition', `inline; filename="${String(downloadName).replace(/"/g, '')}"`);
+      fs.createReadStream(abs(row.file_path)).pipe(res);
+    })
+  );
+
+  app.get(
+    '/v1/media/snapshots/:snapshotId',
+    requireTenantContext,
+    asyncHandler(async (req, res) => {
+      const { snapshotId } = req.params;
+      if (!isUuid(snapshotId)) {
+        return res.status(400).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 400, detail: 'Invalid snapshot id' })
+        );
+      }
+      const { rows } = await query(
+        `SELECT file_path, mime_type FROM session_snapshots WHERE id = $1 AND tenant_id = $2`,
+        [snapshotId, req.tenantContext.tenantId]
+      );
+      const row = rows[0];
+      if (!row || !row.file_path) {
+        return res.status(404).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.notFound, title: 'Not Found', status: 404, detail: 'Snapshot file not stored locally' })
+        );
+      }
+      const st = statSafe(row.file_path);
+      if (!st) {
+        return res.status(410).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.notFound, title: 'Gone', status: 410, detail: 'File missing on disk' })
+        );
+      }
+      res.setHeader('Content-Type', row.mime_type || 'image/jpeg');
+      res.setHeader('Content-Length', String(st.size));
+      fs.createReadStream(abs(row.file_path)).pipe(res);
+    })
+  );
+
+  app.get(
+    '/v1/media/session-report',
+    asyncHandler(async (req, res) => {
+      const token = req.query.token;
+      if (!token) {
+        return res.status(400).type('application/problem+json').json(
+          problemDetails({
+            type: ProblemTypes.validation,
+            title: 'Validation Error',
+            status: 400,
+            detail: 'Query parameter "token" is required.',
+          })
+        );
+      }
+      try {
+        const row = await resolveSessionReportRequest(String(token));
+        res.json({
+          data: {
+            session_id: row.id,
+            exam_title: row.exam_title,
+            status: row.status,
+            violation_flags: row.violation_flags,
+            external_ref: row.external_ref,
+            pdf_ready: false,
+            note: 'Replace with generated PDF bytes or redirect to object storage.',
+          },
+        });
+      } catch (e) {
+        if (e.status === 401 || e.status === 404) {
+          return res.status(e.status).type('application/problem+json').json(
+            problemDetails({
+              type: e.status === 404 ? ProblemTypes.notFound : ProblemTypes.unauthorized,
+              title: e.status === 404 ? 'Not Found' : 'Unauthorized',
+              status: e.status,
+              detail: e.message,
+            })
+          );
+        }
+        throw e;
+      }
+    })
+  );
+}

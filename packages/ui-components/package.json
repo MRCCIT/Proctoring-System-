@@ -1,0 +1,14 @@
+{
+  "name": "@proctorshield/ui-components",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/index.tsx",
+  "types": "./src/index.tsx",
+  "exports": { ".": "./src/index.tsx" },
+  "peerDependencies": {
+    "next": "^14.0.0",
+    "react": "^18.0.0"
+  },
+  "scripts": { "build": "echo ok", "dev": "echo ok", "lint": "echo ok" },
+  "devDependencies": { "@types/react": "^18.3.3", "typescript": "^5.5.0" }
+}

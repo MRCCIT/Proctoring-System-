@@ -1,0 +1,4 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f1f5f9; }
+button.primary { background: #0f172a; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; }
+input { padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; }

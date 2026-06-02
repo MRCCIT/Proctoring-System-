@@ -1,0 +1,8 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; }
+input, select, textarea, button { font: inherit; }
+button { cursor: pointer; padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; }
+button.primary { background: #0f172a; color: #fff; border-color: #0f172a; }
+.error { color: #b91c1c; }
+.muted { color: #64748b; font-size: 14px; }
+pre.json { background: #f8fafc; padding: 12px; overflow: auto; font-size: 12px; border-radius: 6px; }

@@ -1,0 +1,81 @@
+import { analyzeSessionFrame } from './aiClient.js';
+import { getSessionProctorState } from './sessionProctorState.js';
+import { persistUnifiedProctorTick } from './monitoringPersistence.js';
+import { getSessionIdentityReference } from '../sdk/identityReference.js';
+
+const referenceCache = new Map();
+
+async function loadReferenceDataUrl(tenantId, sessionId) {
+  const cacheKey = `${tenantId}:${sessionId}`;
+  if (referenceCache.has(cacheKey)) return referenceCache.get(cacheKey);
+
+  const ref = await getSessionIdentityReference(tenantId, sessionId);
+  const dataUrl = ref.enrolled && ref.data_url ? ref.data_url : null;
+  referenceCache.set(cacheKey, dataUrl);
+  return dataUrl;
+}
+
+export function clearReferenceCache(sessionId) {
+  for (const k of referenceCache.keys()) {
+    if (k.endsWith(`:${sessionId}`)) referenceCache.delete(k);
+  }
+}
+
+/**
+ * One proctor tick: Python microservices (face, gaze, phone, identity) in a single call.
+ */
+export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, options = {}) {
+  const state = getSessionProctorState(sessionId);
+  let reference_image = options.reference_image || null;
+  if (!reference_image && options.loadReference !== false) {
+    reference_image = await loadReferenceDataUrl(tenantId, sessionId);
+  }
+
+  const tickIndex = state.tickCount;
+  state.tickCount += 1;
+
+  const deepGazeEvery = parseInt(process.env.DEEP_GAZE_EVERY_N_TICKS || '2', 10) || 2;
+  const deepGaze =
+    options.run_deep_gaze != null ? Boolean(options.run_deep_gaze) : tickIndex % deepGazeEvery === 0;
+
+  const payload = {
+    image: imageDataUrl,
+    reference_image: reference_image || undefined,
+    identity_threshold: options.identity_threshold,
+    phone_streak: state.phoneStreak,
+    phone_active: state.phoneActive,
+    identity_mismatch_streak: state.identityMismatchStreak,
+    tick_index: tickIndex,
+    run_identity: Boolean(options.run_identity),
+    run_phone: options.run_phone !== false,
+    run_deep_gaze: deepGaze,
+  };
+
+  const analysis = await analyzeSessionFrame(payload);
+
+  state.phoneStreak = analysis.phone_streak ?? 0;
+  state.phoneActive = Boolean(analysis.phone_active);
+  state.identityMismatchStreak = analysis.identity_mismatch_streak ?? 0;
+  state.lastTickAt = Date.now();
+
+  const violations = analysis.violations || [];
+  const shouldPersist =
+    options.persist &&
+    (violations.length > 0 || tickIndex % 8 === 0 || Boolean(analysis.phone_active));
+
+  let persistence = { events: 0, face_check: false, deferred: false };
+  let persist_error = null;
+  if (shouldPersist) {
+    persistence = { events: 0, face_check: false, deferred: true };
+    void persistUnifiedProctorTick(tenantId, sessionId, analysis)
+      .then((p) => {
+        persistence = { ...p, deferred: false };
+      })
+      .catch((e) => {
+        persist_error = e.message || String(e);
+        console.error('[unifiedProctor] persist failed', sessionId, persist_error);
+      });
+  }
+
+  return { analysis, persistence, persist_error, state: { ...state } };
+}

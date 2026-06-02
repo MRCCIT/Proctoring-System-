@@ -1,0 +1,14 @@
+# AI monitoring sidecar (Python 3.10+). Install: pip install -r requirements.txt
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+numpy>=1.26.0,<2
+opencv-python-headless>=4.9.0.80
+mediapipe>=0.10.14
+Pillow>=10.0.0
+pydantic>=2.0.0
+requests>=2.31.0
+# Torch stack (CPU wheels vary by platform; install from https://pytorch.org if needed)
+torch>=2.1.0
+torchvision>=0.16.0
+ultralytics>=8.1.0
+facenet-pytorch>=2.5.3

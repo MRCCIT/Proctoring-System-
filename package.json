@@ -1,0 +1,28 @@
+{
+  "name": "proctorshield",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@10.8.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "dev:api": "npm run dev -w @proctorshield/platform-api",
+    "dev:backend": "node scripts/dev-backend.mjs",
+    "dev:super": "npm run dev -w @proctorshield/super-admin-portal",
+    "dev:tenant": "npm run dev -w @proctorshield/tenant-admin-portal",
+    "dev:candidate": "npm run dev -w @proctorshield/candidate-exam-app",
+    "dev:ai": "python python/run_ai_server.py",
+    "ai:install": "python -m pip install -r python/requirements.txt",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "db:migrate": "npm run db:migrate -w @proctorshield/platform-api",
+    "db:seed": "npm run db:seed -w @proctorshield/platform-api"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3"
+  }
+}

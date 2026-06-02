@@ -1,0 +1,29 @@
+{
+  "name": "@proctorshield/platform-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "predev": "node scripts/predev.mjs",
+    "dev": "node --watch src/server.js",
+    "db:create": "node src/db/create-database.js",
+    "db:migrate": "node src/db/migrate.js",
+    "db:seed": "node src/db/seed.js",
+    "ai:serve": "node scripts/ai-serve.mjs",
+    "build": "node -e \"console.log('platform-api: no bundle')\"",
+    "lint": "node -e \"console.log('lint skipped')\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  }
+}
