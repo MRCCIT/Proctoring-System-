@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProctorShield — Production Scaling & Infrastructure Guide</title>
+  <style>
+    :root {
+      --text: #1a1a2e;
+      --muted: #555;
+      --accent: #2563eb;
+      --border: #e2e8f0;
+      --bg-code: #f1f5f9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+      color: var(--text);
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 2.5rem;
+      font-size: 11pt;
+    }
+    h1 { font-size: 1.75rem; color: var(--accent); border-bottom: 3px solid var(--accent); padding-bottom: 0.5rem; margin-top: 0; }
+    h2 { font-size: 1.35rem; color: #1e40af; margin-top: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; page-break-after: avoid; }
+    h3 { font-size: 1.1rem; margin-top: 1.5rem; page-break-after: avoid; }
+    h4 { font-size: 1rem; margin-top: 1rem; }
+    p { margin: 0.6rem 0; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 9.5pt; page-break-inside: avoid; }
+    th, td { border: 1px solid var(--border); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: #eff6ff; font-weight: 600; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    code { background: var(--bg-code); padding: 0.15rem 0.35rem; border-radius: 3px; font-size: 0.9em; }
+    pre.code-block {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 1rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 8.5pt;
+      line-height: 1.45;
+      page-break-inside: avoid;
+    }
+    pre.code-block code { background: none; color: inherit; padding: 0; }
+    ul, ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+    li { margin: 0.25rem 0; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+    strong { color: #0f172a; }
+    .print-hint {
+      background: #fef3c7;
+      border: 1px solid #f59e0b;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      margin-bottom: 2rem;
+      font-size: 10pt;
+    }
+    @media print {
+      body { padding: 1rem; font-size: 10pt; }
+      .print-hint { display: none; }
+      h2 { page-break-before: auto; }
+      a { color: inherit; text-decoration: none; }
+    }
+    @page { margin: 1.5cm; }
+  </style>
+</head>
+<body>
+  <div class="print-hint">
+    <strong>Save as PDF:</strong> Press <kbd>Ctrl+P</kbd> (or Cmd+P on Mac) → choose <strong>Save as PDF</strong> → Save.
+  </div>
+  <h1>ProctorShield — Production Scaling &amp; Infrastructure Guide</h1>
+
+<strong>Document Version:</strong> 1.0  
+<strong>Date:</strong> June 10, 2026  
+<strong>Product:</strong> ProctorShield (Proctoring Service Platform)  
+<strong>Target Scale:</strong> 1–2 Lakh (100,000–200,000) Concurrent Users  
+<strong>Prepared for:</strong> Production deployment planning
+
+<hr>
+
+<h2>Table of Contents</h2>
+
+<ol><li>[Executive Summary](#1-executive-summary)</li></ol>
+<ol><li>[Current System Analysis](#2-current-system-analysis)</li></ol>
+<ol><li>[Traffic Profile at Scale](#3-traffic-profile-at-scale)</li></ol>
+<ol><li>[Target Architecture &amp; Microservices](#4-target-architecture--microservices)</li></ol>
+<ol><li>[System Design Concepts](#5-system-design-concepts)</li></ol>
+<ol><li>[Production Server Configuration](#6-production-server-configuration)</li></ol>
+<ol><li>[Implementation Guide](#7-implementation-guide)</li></ol>
+<ol><li>[Monthly Cost Plan](#8-monthly-cost-plan)</li></ol>
+<ol><li>[Phased Rollout Plan](#9-phased-rollout-plan)</li></ol>
+<ol><li>[What Breaks First Today](#10-what-breaks-first-today)</li></ol>
+<ol><li>[Appendix — Key Files &amp; Checklists](#11-appendix--key-files--checklists)</li></ol>
+
+<hr>
+
+<h2>1. Executive Summary</h2>
+
+ProctorShield is a multi-tenant online exam proctoring platform built as a <strong>modular monolith</strong> with:
+
+<ul><li><strong>1 Node.js API</strong> (<code>platform-api</code>) — Express, PostgreSQL, WebSockets</li></ul>
+<ul><li><strong>1 Python AI sidecar</strong> — FastAPI, face/gaze/phone/identity detection</li></ul>
+<ul><li><strong>3 frontends</strong> — Super Admin, Tenant Admin, Candidate Exam App</li></ul>
+<ul><li><strong>1 shared SDK</strong> (<code>@proctorshield/sdk</code>) — Candidate experience, lockdown, recording, AI</li></ul>
+
+The system is well-architected for <strong>development and demo scale</strong> (~50–200 concurrent sessions per API instance) but requires substantial infrastructure investment to support <strong>1–2 lakh simultaneous exam takers</strong>.
+
+<h3>Key Recommendations</h3>
+
+| Priority | Action |
+|----------|--------|
+| 1 | Direct-to-S3 uploads (stop routing media through API) |
+| 2 | Split WebSocket gateway + Redis pub/sub for horizontal scale |
+| 3 | Queue + batch writes for face checks and events |
+| 4 | Client-side AI as default; server AI async and sampled |
+| 5 | Enforce tenant quotas at session init |
+| 6 | Load test 150k sessions before exam day |
+
+<h3>Cost Summary (USD / Month)</h3>
+
+| Scenario | Monthly Cost |
+|----------|-------------|
+| Dev / Staging | $600 – $1,200 |
+| Production Standby (no mega exam) | $4,500 – $7,500 |
+| Mega Exam Month (150k concurrent) | $28,000 – $55,000 |
+| Mega Exam Month (optimized) | $15,000 – $28,000 |
+
+<hr>
+
+<h2>2. Current System Analysis</h2>
+
+<h3>2.1 Repository Structure</h3>
+
+``<code>
+Procotring-servicea-app/
+├── apps/
+│   ├── super-admin-portal/     (Next.js 14, port 3100)
+│   ├── tenant-admin-portal/    (Next.js 14, port 3200)
+│   └── candidate-exam-app/     (Vite 5, port 3300)
+├── services/
+│   └── platform-api/           (Express 4, port 3000)
+├── packages/
+│   ├── sdk/                    (@proctorshield/sdk)
+│   ├── shared-types/
+│   ├── ui-components/
+│   └── utils/
+├── python/                     (AI sidecar, port 5055)
+└── docker-compose.yml          (Postgres only)
+</code>`<code>
+
+<h3>2.2 Tech Stack</h3>
+
+| Layer | Technology |
+|-------|------------|
+| Monorepo | npm workspaces, Turbo 2 |
+| Frontend | Next.js 14, Vite 5, React 18, TypeScript |
+| Backend API | Express 4 (ESM), Node </code>http<code> + </code>ws<code> |
+| AI sidecar | Python 3.10+, FastAPI, MediaPipe, YOLO, ArcFace |
+| Database | PostgreSQL 16 (</code>pg<code> driver, pool </code>max: 20<code>) |
+| Auth | JWT, bcrypt, SHA-256 API key hashing |
+| Real-time | Native WebSocket (</code>ws<code>), WebRTC (browser P2P) |
+| Media | Browser MediaRecorder, chunked uploads, <strong>local filesystem</strong> |
+| Queues | <strong>None</strong> |
+| Caching | <strong>None</strong> (small in-process Maps only) |
+| Object storage | Local disk (</code>storage/<code>), </code>object_key<code> schema ready for S3 |
+| TURN/STUN | Google STUN default; dev placeholder for TURN |
+
+<h3>2.3 Current Architecture Diagram</h3>
+
+</code>`<code>
+┌─────────────────────────────────────────────────────────────────┐
+│                        Client Layer                              │
+│  Super Admin (3100) │ Tenant Admin (3200) │ Candidate SDK (3300) │
+│         └──────────────── @proctorshield/sdk ─────────────────┘  │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ HTTP / WebSocket / WebRTC
+┌────────────────────────────▼────────────────────────────────────┐
+│              platform-api (Express monolith)                     │
+│  /v1/superadmin  /v1/tenant/*  /v1/sdk/*  /v1/media/*           │
+│  WebSocket: /v1/sdk/ws/sessions/{sessionId}                      │
+│  In-memory: WS peers, AI proctor state, reference cache          │
+└────────────┬───────────────────────────────┬────────────────────┘
+             │ HTTP (sync)                   │ SQL
+┌────────────▼────────────┐    ┌─────────────▼────────────────────┐
+│  Python AI Sidecar      │    │  PostgreSQL 16                  │
+│  FastAPI :5055          │    │  (docker-compose :55432)        │
+└─────────────────────────┘    └──────────────────────────────────┘
+             │
+┌────────────▼────────────┐
+│  Local filesystem       │
+│  storage/recordings/    │
+│  storage/snapshots/     │
+└─────────────────────────┘
+</code>`<code>
+
+<h3>2.4 Current Capacity vs Target</h3>
+
+| Component | Current State | Max Capacity Today |
+|-----------|---------------|-------------------|
+| platform-api | Single Express process, </code>pg<code> pool max 20 | ~50–200 concurrent sessions/instance |
+| WebSockets | In-memory peer map | Cannot scale horizontally |
+| AI | Sync HTTP to Python sidecar | ~10–50 sessions per GPU |
+| Media | Local disk | Single machine only |
+| Database | Single Postgres, no replicas | Write-bound at ~1k writes/sec |
+| Cache/Queue | None | No async processing |
+| Quotas | </code>max_concurrent_sessions<code> in DB | <strong>Not enforced at runtime</strong> |
+
+<h3>2.5 What Already Works Well for Scale</h3>
+
+<ul><li><strong>Client-side face checks</strong> in Web Worker (SDK README: safe for 50k+ candidates)</li></ul>
+<ul><li><strong>Chunked recording</strong> (10–15s chunks)</li></ul>
+<ul><li><strong>AI throttle + circuit breaker</strong> (</code>AiSidecarThrottle.ts<code>)</li></ul>
+<ul><li><strong>Deferred AI persistence</strong> (non-blocking writes)</li></ul>
+<ul><li><strong>Partition-friendly schema</strong> comments on </code>session_face_checks<code></li></ul>
+<ul><li><strong></code>object_key<code> columns</strong> ready for S3/GCS</li></ul>
+<ul><li><strong>AI sidecar</strong> as separate process (can scale independently once async)</li></ul>
+
+<hr>
+
+<h2>3. Traffic Profile at Scale</h2>
+
+<h3>3.1 Assumptions — 150,000 Concurrent Sessions</h3>
+
+<ul><li>Exam duration: 2–3 hours</li></ul>
+<ul><li>Live proctors: ~5% (7,500 proctors)</li></ul>
+<ul><li>Recording: Camera + screen, chunked upload</li></ul>
+<ul><li>Face checks: Every 10–15 seconds (client-side)</li></ul>
+
+<h3>3.2 Peak Load Estimates</h3>
+
+| Stream | Rate at Peak |
+|--------|--------------|
+| WebSocket connections | ~157,000 persistent (150k candidates + 7.5k proctors) |
+| Session init burst | 150k in 15–30 min ≈ <strong>80–170 req/s</strong> |
+| Face-check DB writes | <strong>~15,000 writes/sec</strong> (if every 10s, direct to DB) |
+| Server AI ticks (if 1 Hz) | <strong>150,000 req/s</strong> — <strong>DO NOT do synchronously</strong> |
+| Recording chunk uploads | <strong>~25,000 uploads/sec</strong> |
+| Storage ingress | <strong>~12+ GB/s peak</strong> (~86 TB in 2 hours) |
+
+<h3>3.3 Critical Insight</h3>
+
+At 150k scale, <strong>the browser must do most AI work</strong>. Server-side AI at 1 Hz for 150k users would need thousands of GPUs. Use client-side face checks as default; server AI should be <strong>sampled</strong> (1 tick per 30–60s) or <strong>violation-triggered only</strong>.
+
+<hr>
+
+<h2>4. Target Architecture &amp; Microservices</h2>
+
+<h3>4.1 Target Production Architecture</h3>
+
+</code>`<code>
+┌─────────────────────────────────────────────────────────────────┐
+│                        Client Layer                              │
+│  Candidate SDK (150k) │ Tenant Admin │ Super Admin               │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│  Edge: CloudFront CDN + AWS WAF + ALB/NLB                        │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+┌───────▼───────┐  ┌─────────▼─────────┐  ┌───────▼───────┐
+│  API Gateway  │  │  WS Gateway (×80) │  │  CDN / S3     │
+│  (×100 pods)  │  │  + Redis pub/sub  │  │  Direct upload│
+└───────┬───────┘  └─────────┬─────────┘  └───────────────┘
+        │                    │
+┌───────▼────────────────────▼──────────────────────────────────┐
+│  Services: Session │ Tenant │ Auth │ Media │ Telemetry        │
+└───────┬──────────────────────────────────────────────────────┘
+        │
+┌───────▼───────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────┐
+│ Aurora Postgres│  │ Redis Cluster│  │ SQS/SNS     │  │ AI GPU  │
+│ + PgBouncer   │  │ ElastiCache  │  │ Queues      │  │ Workers │
+│ + Replicas    │  │              │  │             │  │         │
+└───────────────┘  └─────────────┘  └─────────────┘  └─────────┘
+</code>`<code>
+
+<h3>4.2 Microservices to Build (Priority Order)</h3>
+
+| # | Service | Responsibility | Split From |
+|---|---------|----------------|------------|
+| 1 | <strong>Session Service</strong> | init, config, end, status, pause/resume | platform-api SDK routes |
+| 2 | <strong>WebSocket Gateway</strong> | Chat, timer sync, WebRTC signaling | sdkSessionWs.js, chat.js |
+| 3 | <strong>Media Service</strong> | Presigned uploads, merge jobs, signed URLs | recording.js, localStorage.js |
+| 4 | <strong>Telemetry Service</strong> | Face checks, violations, batched events | sdkEvents.js, monitoringPersistence.js |
+| 5 | <strong>AI Orchestrator + Workers</strong> | Queue-based inference | unifiedProctorAnalyze.js, Python sidecar |
+| 6 | <strong>Auth Service</strong> | JWT, API key lookup (cached), WS tokens | auth.js, sdkApiKey.js |
+| 7 | <strong>Tenant Service</strong> | CRUD, quotas, branding, users | Tenant admin routes |
+| 8 | <strong>Webhook Worker</strong> | Async delivery with retry/DLQ | webhooks.js |
+| 9 | <strong>Analytics Service</strong> | Aggregations, dashboards | analyticsService.js |
+| 10 | <strong>Report Service</strong> | PDF generation, async | media.routes.js |
+| 11 | <strong>TURN Service</strong> | Managed coturn or Twilio/Xirsys | turn-credentials endpoint |
+
+<strong>Keep in monolith initially:</strong> Super admin, policy templates, proctor assignments (low QPS).
+
+<h3>4.3 Production Technology Stack</h3>
+
+| Layer | Technology |
+|-------|------------|
+| <strong>Compute</strong> | Kubernetes (EKS/GKE), 100+ API pods, 80+ WS pods |
+| <strong>Database</strong> | Aurora PostgreSQL + PgBouncer + partitioning + read replicas |
+| <strong>Cache</strong> | Redis Cluster (ElastiCache) |
+| <strong>Queue</strong> | Kafka or AWS SQS + SNS |
+| <strong>Storage</strong> | S3 + CloudFront signed URLs |
+| <strong>Real-time</strong> | Dedicated WS gateway + Redis pub/sub |
+| <strong>AI</strong> | Client-first; async GPU workers behind queue |
+| <strong>CDN/WAF</strong> | CloudFront + AWS WAF |
+| <strong>TURN</strong> | coturn cluster or managed (Twilio/Xirsys) |
+| <strong>Observability</strong> | Prometheus, Grafana, OpenTelemetry, Sentry |
+| <strong>IaC</strong> | Terraform + Helm |
+
+<hr>
+
+<h2>5. System Design Concepts</h2>
+
+<h3>5.1 Stateless API + Stateful Real-Time Split</h3>
+
+WebSocket peers are stored in memory today (</code>chat.js<code>). <strong>Fix:</strong> Dedicated WS gateway pods + Redis pub/sub for </code>broadcastToSession<code>. Use sticky sessions or session-ID hash routing.
+
+<h3>5.2 Write-Behind / Event Sourcing for Hot Tables</h3>
+
+</code>session_face_checks<code> at 15k writes/sec will crush Postgres.
+
+<strong>Techniques:</strong>
+<ul><li>SDK batches face checks (3–5 results per POST every 30s)</li></ul>
+<ul><li>API writes to Kafka/SQS → consumer bulk-inserts in batches of 500–1000</li></ul>
+<ul><li>Partition </code>session_face_checks<code> by </code>created_at<code> (monthly)</li></ul>
+<ul><li>Move hot telemetry to TimescaleDB or ClickHouse</li></ul>
+
+<h3>5.3 Direct-to-Object-Storage Uploads</h3>
+
+<strong>Never</strong> stream 25k uploads/sec through the API.
+
+<strong>Flow:</strong>
+<ol><li>SDK requests presigned URL from Media Service</li></ol>
+<ol><li>SDK uploads chunk directly to S3 (multipart)</li></ol>
+<ol><li>SDK notifies API with </code>object_key<code> only (~200 bytes metadata)</li></ol>
+<ol><li>Merge workers run async on session end</li></ol>
+
+<h3>5.4 Caching Layer (Redis Cluster)</h3>
+
+| Cache Key | TTL | Purpose |
+|-----------|-----|---------|
+| </code>apikey:{hash}<code> → tenant | 5–15 min | Avoid DB hit on every SDK request |
+| </code>session:{id}:status<code> | 30s | Status polls |
+| </code>tenant:{id}:quota<code> | 1 min | Enforce max_concurrent_sessions |
+| </code>ws:session:{id}:peers<code> | ephemeral | Cross-pod WS presence |
+
+<h3>5.5 Connection Pooling (PgBouncer)</h3>
+
+Current pool: </code>max: 20<code> per API instance. At scale: PgBouncer in transaction mode, 100 API pods × 10 connections = 1000 → pooled to ~200–300 real Postgres connections.
+
+<h3>5.6 Backpressure &amp; Circuit Breakers</h3>
+
+<ul><li>API rate limits per tenant (token bucket in Redis)</li></ul>
+<ul><li>Admission control at session init</li></ul>
+<ul><li>Queue depth limits for AI workers</li></ul>
+<ul><li>Graceful degradation: skip server AI, reduce face-check frequency under load</li></ul>
+
+<h3>5.7 Multi-Tenancy at Scale</h3>
+
+<ul><li>Shared DB with </code>tenant_id<code> filter (current model)</li></ul>
+<ul><li>For mega-tenants: dedicated shard or isolated Postgres cluster</li></ul>
+<ul><li>Enforce quotas at </code>POST /v1/sdk/sessions/init<code></li></ul>
+<ul><li>Per-tenant rate limits and connection budgets</li></ul>
+
+<h3>5.8 CDN + Static Assets</h3>
+
+<ul><li>SDK bundle on CloudFront (versioned, immutable cache)</li></ul>
+<ul><li>Admin portals on Vercel/Amplify or containerized</li></ul>
+<ul><li>Media playback via signed CloudFront URLs</li></ul>
+
+<h3>5.9 Observability</h3>
+
+<ul><li>OpenTelemetry traces across API → queue → AI → DB</li></ul>
+<ul><li>Prometheus + Grafana: WS connections, queue lag, DB replication lag</li></ul>
+<ul><li>Sentry for client SDK errors (sample at 1–10% for 150k browsers)</li></ul>
+<ul><li>Structured audit logs → OpenSearch</li></ul>
+
+<h3>5.10 Disaster Recovery</h3>
+
+<ul><li>Blue/green deploy freeze 48h before exam</li></ul>
+<ul><li>Chaos test: kill 30% of WS pods mid-exam</li></ul>
+<ul><li>Aurora Multi-AZ, tested failover</li></ul>
+<ul><li>Regional DR: secondary region with read replica promotion</li></ul>
+<ul><li>Synthetic monitoring: 10k fake sessions in staging 1 week before</li></ul>
+
+<hr>
+
+<h2>6. Production Server Configuration</h2>
+
+<h3>6.1 Recommended Cloud: AWS ap-south-1 (Mumbai)</h3>
+
+<h4>Edge &amp; Frontends</h4>
+
+| Resource | Spec | Count | Notes |
+|----------|------|-------|-------|
+| CloudFront | Global | 1 distribution | SDK JS, static assets |
+| WAF | Rate rules | 1 | DDoS, bot protection |
+| ALB | L7 | 2 (multi-AZ) | API + WS |
+| Next.js admin apps | 2 vCPU, 4GB | 3–5 pods each | Auto-scale on CPU |
+
+<h4>API Plane</h4>
+
+| Resource | Spec | Count (peak) |
+|----------|------|--------------|
+| EKS node group | c6i.2xlarge (8 vCPU, 16GB) | 20–40 nodes |
+| API pods | 2 vCPU, 4GB each | <strong>80–150 pods</strong> |
+| PgBouncer | Sidecar or dedicated | 3 |
+
+<strong>Sizing:</strong> 150k sessions × ~10 req/min ≈ 25k req/s → need <strong>50–80 API pods</strong> minimum, plan <strong>100+ with headroom</strong>.
+
+<h4>WebSocket Gateway</h4>
+
+| Resource | Spec | Count |
+|----------|------|-------|
+| WS pods | 4 vCPU, 8GB | <strong>60–100 pods</strong> (~2k connections/pod) |
+| Redis Cluster | r6g.2xlarge × 6 shards | 1 cluster |
+| NLB | TCP pass-through | 1 |
+
+<strong>Sizing:</strong> 157k connections ÷ 2k per pod ≈ <strong>80 WS pods</strong> minimum.
+
+<h4>Database</h4>
+
+| Resource | Spec |
+|----------|------|
+| Postgres Primary | db.r6g.8xlarge or Aurora PostgreSQL io-optimized |
+| Read Replicas | 3–5 × db.r6g.4xlarge |
+| PgBouncer | 3 instances, max 300 server connections |
+| Partitioning | session_face_checks, session_events (monthly) |
+
+<h4>Media (S3)</h4>
+
+| Resource | Spec |
+|----------|------|
+| S3 bucket | Standard + Intelligent-Tiering (~100 TB per mega-exam) |
+| S3 Transfer Acceleration | Enabled |
+| Merge workers | 100–200 Lambda/ECS workers |
+| CloudFront | Origin = S3, signed URLs |
+
+<h4>AI (If Server-Side Required)</h4>
+
+| Resource | Spec | Count |
+|----------|------|-------|
+| GPU workers | g5.xlarge (1× A10G) | 200–500 at 1 Hz (avoid) |
+| GPU workers (optimized) | g5.xlarge | <strong>50–100</strong> at 0.2 Hz or violation-only |
+| AI queue | Kafka or SQS | — |
+
+<strong>Recommendation:</strong> Client-side face checks only during peak; server AI 1 sample per 60s or violation-triggered.
+
+<h4>TURN (Live Proctoring)</h4>
+
+| Resource | Notes |
+|----------|-------|
+| coturn on c6i.4xlarge × 10–20 | Or Twilio/Xirsys managed |
+| 7,500 proctors × 1 WebRTC stream | ~7.5 Gbps media relay at peak |
+
+<h4>Async Workers</h4>
+
+| Worker | Pods | Trigger |
+|--------|------|---------|
+| Webhook dispatcher | 20 | Kafka/SQS |
+| Recording merge | 50–100 | Session end event |
+| Report PDF | 10 | On demand |
+| Analytics ETL | 5 | Stream to ClickHouse |
+
+<h3>6.2 Kubernetes Topology</h3>
+
+</code>`<code>
+Region: ap-south-1 (Mumbai) — primary
+DR Region: ap-south-2 (Hyderabad) — warm standby
+
+Namespaces:
+  proctorshield-edge      (ingress, cert-manager)
+  proctorshield-api       (session, tenant, auth)
+  proctorshield-realtime  (ws-gateway)
+  proctorshield-media     (upload coordinator, merge workers)
+  proctorshield-ai        (orchestrator, gpu workers)
+  proctorshield-workers   (webhooks, reports)
+  proctorshield-data      (redis, pgbouncer)
+
+HPA rules:
+  API:  CPU 60% OR p99 latency &gt; 200ms → scale
+  WS:   active_connections &gt; 1500 per pod → scale
+  AI:   queue_depth &gt; 1000 → scale GPU workers
+</code>`<code>
+
+<hr>
+
+<h2>7. Implementation Guide</h2>
+
+<h3>7.1 Repository Structure to Add</h3>
+
+</code>`<code>
+Procotring-servicea-app/
+├── infrastructure/
+│   ├── terraform/
+│   │   ├── environments/dev/
+│   │   ├── environments/prod/
+│   │   └── modules/ (vpc, eks, aurora, elasticache, s3-cloudfront, sqs-sns, waf)
+│   └── helm/
+│       ├── proctorshield/
+│       └── coturn/
+├── services/
+│   ├── platform-api/Dockerfile
+│   ├── ws-gateway/          (NEW)
+│   └── ai-worker/           (NEW)
+└── .github/workflows/
+    ├── build-api.yml
+    └── deploy-prod.yml
+</code>`<code>
+
+<h3>7.2 Phase 0 — Containerize (Week 1)</h3>
+
+<strong>Dockerfile for platform-api:</strong>
+
+</code>`<code>dockerfile
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY services/platform-api/package.json services/platform-api/
+RUN npm ci --workspace=@proctorshield/platform-api --omit=dev
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
+COPY services/platform-api ./services/platform-api
+WORKDIR /app/services/platform-api
+EXPOSE 3000
+HEALTHCHECK CMD wget -qO- http://localhost:3000/health || exit 1
+CMD ["node", "src/server.js"]
+</code>`<code>
+
+<strong>Split WebSocket:</strong> Extract </code>sdkSessionWs.js<code> into </code>services/ws-gateway/<code> with Redis pub/sub replacing in-memory </code>sessionPeers<code> Map.
+
+<h3>7.3 Phase 1 — Terraform Foundation (Week 2–3)</h3>
+
+<strong>Modules to provision:</strong>
+<ul><li>VPC (3 public + 3 private subnets, NAT)</li></ul>
+<ul><li>EKS (API, WS, GPU node groups)</li></ul>
+<ul><li>Aurora PostgreSQL 16 (writer + 3 readers)</li></ul>
+<ul><li>ElastiCache Redis 7 (3 shards)</li></ul>
+<ul><li>S3 + CloudFront</li></ul>
+<ul><li>SQS + SNS (face-checks, events, webhooks, recording-merge)</li></ul>
+<ul><li>WAF on ALB</li></ul>
+
+<strong>Deploy:</strong>
+</code>`<code>bash
+cd infrastructure/terraform/environments/prod
+terraform init
+terraform plan -out=plan.tfplan
+terraform apply plan.tfplan
+aws eks update-kubeconfig --name proctorshield-prod --region ap-south-1
+</code>`<code>
+
+<h3>7.4 Phase 2 — Database (Week 3)</h3>
+
+<ul><li>Deploy PgBouncer between API and Aurora</li></ul>
+<ul><li>Update </code>DATABASE_URL<code> to point at PgBouncer</li></ul>
+<ul><li>Run partition migration on </code>session_face_checks<code>, </code>session_events<code></li></ul>
+<ul><li>Run migrations as K8s Job before each deploy</li></ul>
+
+<h3>7.5 Phase 3 — Redis Cache (Week 4)</h3>
+
+<ul><li>Cache API key → tenant lookup (5–15 min TTL)</li></ul>
+<ul><li>Cache session status (30s TTL)</li></ul>
+<ul><li>Enforce </code>max_concurrent_sessions<code> at session init</li></ul>
+<ul><li>WS pub/sub for cross-pod broadcast</li></ul>
+
+<h3>7.6 Phase 4 — S3 Media (Week 4–5)</h3>
+
+<strong>New upload flow:</strong>
+</code>`<code>
+SDK → POST /recording-chunk/init → presigned S3 URL
+SDK → PUT directly to S3
+SDK → POST /recording-chunk/complete { object_key, bytes, sequence }
+API → metadata row only
+</code>`<code>
+
+<strong>Env vars:</strong>
+</code>`<code>env
+STORAGE_BACKEND=s3
+S3_BUCKET=proctorshield-media-prod
+AWS_REGION=ap-south-1
+CLOUDFRONT_DOMAIN=media.proctorshield.com
+</code>`<code>
+
+<h3>7.7 Phase 5 — Queues (Week 5–6)</h3>
+
+<ul><li>API publishes face checks to SNS → SQS</li></ul>
+<ul><li>Telemetry worker bulk-inserts 500 rows at a time</li></ul>
+<ul><li>Webhook worker with retry + DLQ</li></ul>
+<ul><li>Recording merge worker on session end event</li></ul>
+
+<h3>7.8 Phase 6 — Kubernetes + Helm (Week 6–7)</h3>
+
+</code>`<code>bash
+helm upgrade --install proctorshield ./infrastructure/helm/proctorshield \
+  -f values-prod.yaml \
+  --namespace proctorshield --create-namespace
+</code>`<code>
+
+<strong>HPA targets:</strong>
+<ul><li>API: 20 min → 120 max replicas</li></ul>
+<ul><li>WS: 30 min → 100 max replicas</li></ul>
+<ul><li>AI workers: 5 min → 50 max (spot instances)</li></ul>
+
+<h3>7.9 Phase 7 — Observability (Week 7–8)</h3>
+
+<ul><li>OpenTelemetry in API and WS gateway</li></ul>
+<ul><li>Prometheus </code>/metrics<code> endpoint</li></ul>
+<ul><li>kube-prometheus-stack Helm chart</li></ul>
+<ul><li>Sentry for SDK (sampled) and API</li></ul>
+<ul><li>Dashboards: active sessions, WS connections, queue depth, Aurora lag</li></ul>
+
+<h3>7.10 Phase 8 — TURN (Week 8)</h3>
+
+<strong>Option A (fastest):</strong> Twilio Network Traversal or Xirsys managed  
+<strong>Option B:</strong> Self-hosted coturn on EKS behind NLB (UDP required)
+
+<h3>7.11 Environment Variables (Production Secret)</h3>
+
+</code>`<code>env
+DATABASE_URL=postgresql://app:***@pgbouncer:6432/proctorshield
+DATABASE_READ_URL=postgresql://app:***@pgbouncer-read:6432/proctorshield
+JWT_SECRET=&lt;64-char random&gt;
+REDIS_URL=rediss://elasticache-endpoint:6379
+STORAGE_BACKEND=s3
+S3_BUCKET=proctorshield-media-prod
+AWS_REGION=ap-south-1
+SNS_FACE_CHECKS_ARN=arn:aws:sns:...
+SQS_FACE_CHECKS_URL=https://sqs...
+AI_SERVICE_URL=http://ai-worker:5055
+AI_MODE=async
+PUBLIC_WS_BASE_URL=wss://ws.proctorshield.com
+PUBLIC_API_BASE_URL=https://api.proctorshield.com
+TURN_PROVIDER=xirsys
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+SENTRY_DSN=https://...
+</code>`<code>
+
+<h3>7.12 Load Testing (Before Exam Day)</h3>
+
+Use k6 or Locust:
+<ul><li>Ramp 150k sessions over 15 minutes</li></ul>
+<ul><li>Hold 2 hours</li></ul>
+<ul><li>Measure: session init p99 &lt; 500ms, WS connect &gt; 99.9%, zero OOM kills, SQS age &lt; 30s, Aurora CPU &lt; 70%</li></ul>
+
+<hr>
+
+<h2>8. Monthly Cost Plan</h2>
+
+<h3>8.1 Three Plans</h3>
+
+| Plan | Use Case | Monthly Total (USD) |
+|------|----------|---------------------|
+| <strong>Plan A — Dev/Staging</strong> | Build, test, pilots | $600 – $1,200 |
+| <strong>Plan B — Production Standby</strong> | Live platform, low traffic | $4,500 – $7,500 |
+| <strong>Plan C — Mega Exam Month</strong> | 1 exam, 150k concurrent | $28,000 – $55,000 |
+| <strong>Plan C Optimized</strong> | Spot, client AI, lifecycle policies | $15,000 – $28,000 |
+
+<h3>8.2 Plan C — Complete Service Breakdown</h3>
+
+| # | Service | Spec | Monthly Cost (USD) |
+|---|---------|------|-------------------|
+| 1 | EKS control plane | 1 cluster | $73 |
+| 2 | EC2 — API nodes | 40× c6i.2xlarge × 5 days + 8× rest | $4,500 – $7,000 |
+| 3 | EC2 — WS gateway | 60× c6i.2xlarge × 5 days + 6× rest | $4,000 – $6,500 |
+| 4 | EC2 — Workers | 30× c6i.xlarge spot × 5 days | $800 – $1,500 |
+| 5 | EC2 — GPU (AI) | 20× g5.xlarge spot × 3 days | $1,200 – $2,500 |
+| 6 | Aurora PostgreSQL | Writer + 3 readers | $3,500 – $6,000 |
+| 7 | ElastiCache Redis | 3 shards × 2 replicas | $1,800 – $2,800 |
+| 8 | S3 — media storage | 60–100 TB | $1,400 – $2,500 |
+| 9 | S3 — requests | ~200M PUT + 50M GET | $800 – $1,500 |
+| 10 | CloudFront | 5–15 TB egress | $400 – $1,200 |
+| 11 | Data transfer | 10–30 TB egress | $1,000 – $3,500 |
+| 12 | ALB + NLB | 2 ALB + 1 NLB | $150 – $400 |
+| 13 | NAT Gateway | 3 AZ | $350 – $900 |
+| 14 | AWS WAF | 1 Web ACL | $100 – $300 |
+| 15 | SQS + SNS | ~500M messages | $200 – $500 |
+| 16 | TURN / WebRTC | Managed or coturn | $2,000 – $8,000 |
+| 17 | Route 53 | 3–5 zones | $10 – $30 |
+| 18 | CloudWatch Logs | 500 GB – 2 TB | $250 – $800 |
+| 19 | Sentry | Business, sampled | $80 – $300 |
+| 20 | Backup (Aurora) | Daily snapshots | $200 – $500 |
+| 21 | Frontends | Vercel or EKS | $20 – $200 |
+| 22 | Misc (ECR, Secrets, SMS) | — | $100 – $300 |
+| | <strong>TOTAL</strong> | | <strong>$28,000 – $55,000</strong> |
+
+<h3>8.3 Plan B — Production Standby</h3>
+
+| Category | Monthly Cost |
+|----------|-------------|
+| EKS + 6–8 EC2 nodes | $1,500 – $2,500 |
+| Aurora (1 writer + 1 reader) | $800 – $1,500 |
+| Redis (1 shard) | $400 – $700 |
+| S3 (5–10 TB) | $120 – $250 |
+| CloudFront + ALB + NAT + WAF | $300 – $600 |
+| Observability + misc | $200 – $500 |
+| <strong>TOTAL</strong> | <strong>$4,500 – $7,500</strong> |
+
+<h3>8.4 Cost Drivers (Mega Exam Month)</h3>
+
+| Rank | Service | % of Total |
+|------|---------|-----------|
+| 1 | EC2 / EKS compute | ~35% |
+| 2 | S3 video storage | ~15% |
+| 3 | TURN / WebRTC relay | ~12% |
+| 4 | Aurora PostgreSQL | ~12% |
+| 5 | Data transfer | ~10% |
+| 6 | Redis | ~6% |
+| 7 | GPU (if used) | ~5% |
+
+<h3>8.5 Storage Detail (150k Exam, 2 Hours)</h3>
+
+| Item | Volume | Cost (90-day retention) |
+|------|--------|------------------------|
+| Recordings (camera + screen) | 60–120 TB | $1,400 – $2,800 |
+| Snapshots | 2–5 TB | $50 – $120 |
+| Playback egress (10% reviewed) | 6–12 TB | $650 – $1,300 |
+
+<strong>Lifecycle savings:</strong> Standard → IA (day 31) → Glacier (day 90) cuts storage ~40–80%.
+
+<h3>8.6 TURN Cost Options</h3>
+
+| Option | Exam-Day Cost | Best For |
+|--------|--------------|----------|
+| Twilio Network Traversal | $2,000 – $5,000 | Fastest to production |
+| Xirsys managed | $1,500 – $4,000 | Medium scale |
+| Self-hosted coturn | $500 – $1,500 instances + $2k–5k egress | Full control |
+| No live video (chat only) | $0 | Maximum savings |
+
+<h3>8.7 Cost Optimization (40–50% Savings)</h3>
+
+| Technique | Savings |
+|-----------|---------|
+| Spot instances for workers, merge, AI | −30% compute |
+| Client-only AI (no server GPU) | −$1,500–2,500 |
+| S3 lifecycle → Glacier | −40% storage |
+| Camera only (no screen recording) | −50% storage |
+| Chunk interval 12s → 30s | −20% upload costs |
+| No live proctoring video | −$2,000–8,000 TURN |
+| Reserved instances for base infra | −25% standby |
+
+<h3>8.8 Annual Outlook</h3>
+
+| Pattern | Annual Cost (USD) |
+|---------|-------------------|
+| 12 months standby only | $54,000 – $90,000 |
+| 10 standby + 2 mega exam months | $115,000 – $175,000 |
+| 10 standby + 2 optimized exam months | $90,000 – $130,000 |
+
+<h3>8.9 Recommended Monthly Budget</h3>
+
+| Scenario | Budget to Allocate |
+|----------|-------------------|
+| 1 mega exam per month | <strong>$30,000 – $45,000</strong> |
+| Standby only (no exam) | <strong>$5,000 – $8,000</strong> |
+
+<hr>
+
+<h2>9. Phased Rollout Plan</h2>
+
+<h3>Phase 0 — Before Any Mega Exam (2–4 weeks)</h3>
+
+<ol><li>Enforce </code>max_concurrent_sessions<code> at session init</li></ol>
+<ol><li>Redis for API key cache + session status</li></ol>
+<ol><li>S3 presigned uploads (remove local disk)</li></ol>
+<ol><li>PgBouncer + per-pod pool config</li></ol>
+<ol><li>Batch face-check inserts</li></ol>
+
+<h3>Phase 1 — Horizontal Scale (1–2 months)</h3>
+
+<ol><li>Extract WebSocket Gateway + Redis pub/sub</li></ol>
+<ol><li>Split Media Service (presigned URLs, async merge)</li></ol>
+<ol><li>ALB + 10–20 API replicas</li></ol>
+<ol><li>Postgres read replica for admin/analytics</li></ol>
+<ol><li>CDN for SDK bundle</li></ol>
+
+<h3>Phase 2 — Event-Driven (2–3 months)</h3>
+
+<ol><li>Kafka/SQS for face checks, events, webhooks</li></ol>
+<ol><li>Telemetry Service with bulk writers</li></ol>
+<ol><li>Partition hot tables</li></ol>
+<ol><li>AI queue + GPU worker pool (async only)</li></ol>
+<ol><li>Full observability stack</li></ol>
+
+<h3>Phase 3 — Mega Exam Ready (3–6 months)</h3>
+
+<ol><li>Load test 150k synthetic sessions</li></ol>
+<ol><li>Dedicated infra for single mega-tenant</li></ol>
+<ol><li>Multi-region DR drill</li></ol>
+<ol><li>TURN cluster for live proctoring</li></ol>
+<ol><li>Runbook + 24×7 war room for exam day</li></ol>
+
+<h3>Week-by-Week First Steps</h3>
+
+| Day | Action |
+|-----|--------|
+| 1 | Add Dockerfile for platform-api; verify /health |
+| 2 | Terraform VPC + EKS (dev, small) |
+| 3 | Aurora dev cluster; run migrations; deploy 1 API pod |
+| 4 | S3 presigned URL endpoint for recording chunks |
+| 5 | ElastiCache Redis; cache API key lookup |
+| 6 | Extract ws-gateway; Redis pub/sub; deploy 2 WS pods |
+| 7 | Helm chart + HPA; CI pipeline to ECR |
+
+<hr>
+
+<h2>10. What Breaks First Today</h2>
+
+If deployed at 150k without changes:
+
+<ol><li><strong>Postgres</strong> — 20-connection pool, 15k writes/sec on face checks</li></ol>
+<ol><li><strong>In-memory WebSocket map</strong> — second API instance breaks chat/signaling</li></ol>
+<ol><li><strong>Local disk storage</strong> — fills in minutes, not shared across pods</li></ol>
+<ol><li><strong>Sync AI HTTP</strong> — API threads blocked waiting on Python</li></ol>
+<ol><li><strong>No admission control</strong> — cascade failure when all 150k accepted</li></ol>
+<ol><li><strong>API key DB lookup</strong> — every SDK request hits Postgres</li></ol>
+<ol><li><strong>WebRTC TURN</strong> — Google STUN only; no TURN at scale for live proctors</li></ol>
+
+<hr>
+
+<h2>11. Appendix — Key Files &amp; Checklists</h2>
+
+<h3>11.1 Key Codebase Files</h3>
+
+| Concern | Path |
+|---------|------|
+| API entry | </code>services/platform-api/src/server.js<code> |
+| Route registration | </code>services/platform-api/src/app.js<code> |
+| WebSocket | </code>services/platform-api/src/ws/sdkSessionWs.js<code> |
+| In-memory chat/peers | </code>services/platform-api/src/services/tenant/chat.js<code> |
+| DB config (pool max 20) | </code>services/platform-api/src/config/database.js<code> |
+| Local storage | </code>services/platform-api/src/storage/localStorage.js<code> |
+| AI analysis | </code>services/platform-api/src/services/ai/unifiedProctorAnalyze.js<code> |
+| AI sidecar | </code>python/run_ai_server.py<code> |
+| SDK | </code>packages/sdk/src/<code> |
+| Migrations | </code>services/platform-api/src/db/migrations/<code> |
+| Docker (Postgres only) | </code>docker-compose.yml<code> |
+
+<h3>11.2 SDK Tuning for 150k Users</h3>
+
+| Setting | Recommendation |
+|---------|----------------|
+| </code>faceCheckIntervalMs` | 15–30s during peak |
+| Server AI | Disable or 60s+ interval |
+| Recording chunk size | 20–30s |
+| Face check batching | 3–5 results per API call |
+| Web Worker | Keep — never move to main thread |
+
+<h3>11.3 Production Readiness Checklist</h3>
+
+<ul><li>[ ] Dockerfile for API, WS gateway, AI worker</li></ul>
+<ul><li>[ ] Terraform modules (VPC, EKS, Aurora, Redis, S3, SQS)</li></ul>
+<ul><li>[ ] Helm charts with HPA</li></ul>
+<ul><li>[ ] S3 storage adapter (replace localStorage)</li></ul>
+<ul><li>[ ] Redis cache for API keys and WS pub/sub</li></ul>
+<ul><li>[ ] Queue-based face check writes</li></ul>
+<ul><li>[ ] PgBouncer deployment</li></ul>
+<ul><li>[ ] Table partitioning migration</li></ul>
+<ul><li>[ ] Quota enforcement at session init</li></ul>
+<ul><li>[ ] Presigned URL upload flow in SDK</li></ul>
+<ul><li>[ ] TURN provider (managed or coturn)</li></ul>
+<ul><li>[ ] CloudFront for SDK and media</li></ul>
+<ul><li>[ ] WAF rate limiting</li></ul>
+<ul><li>[ ] OpenTelemetry + Prometheus + Sentry</li></ul>
+<ul><li>[ ] CI/CD to ECR + Helm deploy</li></ul>
+<ul><li>[ ] Load test 150k sessions</li></ul>
+<ul><li>[ ] DR failover drill</li></ul>
+<ul><li>[ ] Exam-day runbook</li></ul>
+
+<h3>11.4 Minimum Production Stack Summary</h3>
+
+| Layer | Technology |
+|-------|------------|
+| Compute | EKS, 100+ API pods, 80+ WS pods |
+| Database | Aurora PostgreSQL + PgBouncer + partitioning + replicas |
+| Cache | Redis Cluster (ElastiCache) |
+| Queue | AWS SQS + SNS (or Kafka) |
+| Storage | S3 + CloudFront signed URLs |
+| Real-time | WS gateway + Redis pub/sub |
+| AI | Client-first; async GPU workers |
+| CDN/WAF | CloudFront + AWS WAF |
+| TURN | coturn or Twilio/Xirsys |
+| Observability | Prometheus, Grafana, OpenTelemetry, Sentry |
+| IaC | Terraform + Helm |
+
+<hr>
+
+<h2>Document Information</h2>
+
+This guide consolidates the complete ProctorShield production scaling analysis, implementation roadmap, and cost planning for deployment at <strong>1–2 lakh (100,000–200,000) concurrent users</strong>.
+
+<strong>Disclaimer:</strong> All cost figures are estimates in USD for AWS ap-south-1 (Mumbai) based on typical pricing. Actual costs depend on exam duration, recording policy, live proctoring ratio, data retention, and traffic patterns. Use AWS Pricing Calculator for firm quotes before procurement.
+
+<hr>
+
+*ProctorShield Production Scaling Guide v1.0 — June 2026*
+  <hr>
+  <p style="color: var(--muted); font-size: 9pt; text-align: center;">
+    ProctorShield Production Scaling Guide v1.0 — June 2026 — Generated from repository documentation.
+  </p>
+</body>
+</html>

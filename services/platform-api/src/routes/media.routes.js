@@ -7,6 +7,33 @@ import { abs, statSafe } from '../storage/localStorage.js';
 import { isUuid } from '../utils/validation.js';
 import { requireTenantContext } from '../middleware/tenantContext.js';
 
+/** Video elements cannot send Authorization headers; allow JWT via query for GET media only. */
+function requireTenantMediaContext(req, res, next) {
+  if (!req.headers.authorization && req.query.access_token) {
+    req.headers.authorization = `Bearer ${String(req.query.access_token)}`;
+  }
+  return requireTenantContext(req, res, next);
+}
+
+function pipeLocalFile(res, filePath) {
+  const stream = fs.createReadStream(filePath);
+  stream.on('error', () => {
+    if (!res.headersSent) {
+      res.status(500).type('application/problem+json').json(
+        problemDetails({
+          type: ProblemTypes.internal,
+          title: 'Internal Server Error',
+          status: 500,
+          detail: 'Failed to read media file',
+        })
+      );
+      return;
+    }
+    res.destroy();
+  });
+  stream.pipe(res);
+}
+
 export function registerMediaRoutes(app) {
   app.get(
     '/v1/media/recording',
@@ -50,7 +77,7 @@ export function registerMediaRoutes(app) {
 
   app.get(
     '/v1/media/recordings/:chunkId',
-    requireTenantContext,
+    requireTenantMediaContext,
     asyncHandler(async (req, res) => {
       const { chunkId } = req.params;
       if (!/^\d+$/.test(chunkId)) {
@@ -86,13 +113,13 @@ export function registerMediaRoutes(app) {
       res.setHeader('Content-Type', row.mime_type || 'video/webm');
       res.setHeader('Content-Length', String(st.size));
       res.setHeader('Content-Disposition', `inline; filename="${String(downloadName).replace(/"/g, '')}"`);
-      fs.createReadStream(abs(row.file_path)).pipe(res);
+      pipeLocalFile(res, abs(row.file_path));
     })
   );
 
   app.get(
     '/v1/media/snapshots/:snapshotId',
-    requireTenantContext,
+    requireTenantMediaContext,
     asyncHandler(async (req, res) => {
       const { snapshotId } = req.params;
       if (!isUuid(snapshotId)) {
@@ -118,7 +145,7 @@ export function registerMediaRoutes(app) {
       }
       res.setHeader('Content-Type', row.mime_type || 'image/jpeg');
       res.setHeader('Content-Length', String(st.size));
-      fs.createReadStream(abs(row.file_path)).pipe(res);
+      pipeLocalFile(res, abs(row.file_path));
     })
   );
 

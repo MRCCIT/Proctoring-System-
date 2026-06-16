@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: proctorshield
     ports:
-      - "55432:5432"
+      - "15432:5432"
     volumes:
       - proctorshield_pg:/var/lib/postgresql/data
     healthcheck:

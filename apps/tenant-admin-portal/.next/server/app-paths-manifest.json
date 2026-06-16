@@ -1,9 +1,13 @@
 {
+  "/exams/page": "app/exams/page.js",
   "/dashboard/page": "app/dashboard/page.js",
-  "/login/page": "app/login/page.js",
-  "/branding/page": "app/branding/page.js",
-  "/settings/page": "app/settings/page.js",
   "/sessions/page": "app/sessions/page.js",
   "/live/page": "app/live/page.js",
+  "/candidates/page": "app/candidates/page.js",
+  "/policies/page": "app/policies/page.js",
+  "/templates/page": "app/templates/page.js",
+  "/branding/page": "app/branding/page.js",
+  "/settings/page": "app/settings/page.js",
+  "/reports/page": "app/reports/page.js",
   "/sessions/[id]/page": "app/sessions/[id]/page.js"
 }

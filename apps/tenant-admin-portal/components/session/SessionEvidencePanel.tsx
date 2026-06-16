@@ -4,9 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Card } from '@proctorshield/ui-components';
 import { formatBytes } from '@/lib/format';
 import {
-  fetchRecordingBlobUrl,
   fetchSnapshotBlobUrl,
   parseViolationLabel,
+  recordingMediaUrl,
   revokeBlobUrls,
   snapshotKind,
 } from '@/lib/sessionMedia';
@@ -86,8 +86,14 @@ export function SessionEvidencePanel(props: {
   const [activeRecId, setActiveRecId] = useState<string | null>(null);
   const [recTrack, setRecTrack] = useState<'camera' | 'screen' | 'all'>('camera');
   const snapUrlsRef = useRef<string[]>([]);
-  const recUrlsRef = useRef<string[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  const recordingRows = useMemo(() => {
+    const withFiles = recordings.filter((r) => r.file_path || (r.bytes != null && r.bytes > 0));
+    const hasMerged = withFiles.some((r) => parseRecMeta(r.metadata).merged);
+    if (hasMerged) return withFiles.filter((r) => parseRecMeta(r.metadata).merged);
+    return withFiles;
+  }, [recordings]);
 
   const filteredSnapRows = useMemo(() => {
     return snapshots.filter((s) => {
@@ -123,16 +129,12 @@ export function SessionEvidencePanel(props: {
     setLoadingSnaps(false);
   }, [filteredSnapRows]);
 
-  const loadRecordings = useCallback(async () => {
+  const loadRecordings = useCallback(() => {
     setLoadingRecs(true);
-    revokeBlobUrls(recUrlsRef.current);
-    recUrlsRef.current = [];
-    const withFiles = recordings.filter((r) => r.file_path || (r.bytes != null && r.bytes > 0));
-    const results = await Promise.all(
-      withFiles.map(async (r) => {
-        const url = await fetchRecordingBlobUrl(r.id);
+    const results = recordingRows
+      .map((r) => {
+        const url = recordingMediaUrl(r.id);
         if (!url) return null;
-        recUrlsRef.current.push(url);
         const meta = parseRecMeta(r.metadata);
         const label =
           meta.display_name ||
@@ -151,11 +153,11 @@ export function SessionEvidencePanel(props: {
           isMerged: Boolean(meta.merged),
         } satisfies LoadedRec;
       })
-    );
-    setLoadedRecs(results.filter(Boolean) as LoadedRec[]);
-    if (results[0]) setActiveRecId(String(results[0]?.id));
+      .filter(Boolean) as LoadedRec[];
+    setLoadedRecs(results);
+    setActiveRecId(results[0] ? results[0].id : null);
     setLoadingRecs(false);
-  }, [recordings, candidateName]);
+  }, [recordingRows, candidateName]);
 
   useEffect(() => {
     void loadSnapshots();
@@ -163,8 +165,7 @@ export function SessionEvidencePanel(props: {
   }, [loadSnapshots]);
 
   useEffect(() => {
-    void loadRecordings();
-    return () => revokeBlobUrls(recUrlsRef.current);
+    loadRecordings();
   }, [loadRecordings]);
 
   const trackRecs = useMemo(() => {
@@ -224,7 +225,7 @@ export function SessionEvidencePanel(props: {
           className={`evidence-tab ${tab === 'recordings' ? 'evidence-tab-active' : ''}`}
           onClick={() => setTab('recordings')}
         >
-          Recordings ({recordings.length})
+          Recordings ({recordingRows.length})
         </button>
       </div>
 

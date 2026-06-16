@@ -3,25 +3,41 @@ import { API_BASE, tenantTokens } from './api';
 export async function fetchSnapshotBlobUrl(snapshotId: string): Promise<string | null> {
   const token = tenantTokens.get();
   if (!token) return null;
-  const res = await fetch(`${API_BASE}/v1/media/snapshots/${snapshotId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) return null;
-  const blob = await res.blob();
-  if (!blob.size) return null;
-  return URL.createObjectURL(blob);
+  try {
+    const res = await fetch(`${API_BASE}/v1/media/snapshots/${snapshotId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob.size) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
+/** Direct stream URL for <video src> — avoids downloading large WebM files into memory. */
+export function recordingMediaUrl(chunkId: string | number): string | null {
+  const token = tenantTokens.get();
+  if (!token) return null;
+  const qs = new URLSearchParams({ access_token: token });
+  return `${API_BASE}/v1/media/recordings/${chunkId}?${qs}`;
 }
 
 export async function fetchRecordingBlobUrl(chunkId: string | number): Promise<string | null> {
   const token = tenantTokens.get();
   if (!token) return null;
-  const res = await fetch(`${API_BASE}/v1/media/recordings/${chunkId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) return null;
-  const blob = await res.blob();
-  if (!blob.size) return null;
-  return URL.createObjectURL(blob);
+  try {
+    const res = await fetch(`${API_BASE}/v1/media/recordings/${chunkId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob.size) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
 }
 
 export function revokeBlobUrls(urls: string[]) {
