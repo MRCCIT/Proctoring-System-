@@ -1,4 +1,4 @@
-/** In-memory per-session proctor state (phone streak, identity streak). */
+/** In-memory per-session proctor state (device and identity streaks). */
 
 const states = new Map();
 
@@ -7,6 +7,8 @@ export function getSessionProctorState(sessionId) {
     states.set(sessionId, {
       phoneStreak: 0,
       phoneActive: false,
+      electronicsStreak: 0,
+      electronicsActive: false,
       identityMismatchStreak: 0,
       lastTickAt: 0,
       tickCount: 0,

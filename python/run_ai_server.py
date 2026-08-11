@@ -24,10 +24,16 @@ from proctoring.config import (
     PHONE_DETECTOR_IOU,
     PHONE_DETECTOR_MAX_DIM,
     PHONE_DETECTOR_MODEL_PATH,
+    ELECTRONICS_DETECTOR_CONFIDENCE,
+    ELECTRONICS_DETECTOR_FRAME_SKIP,
+    ELECTRONICS_DETECTOR_IMAGE_SIZE,
+    ELECTRONICS_DETECTOR_IOU,
+    ELECTRONICS_DETECTOR_MAX_DIM,
+    ELECTRONICS_DETECTOR_MODEL_PATH,
 )
 from proctoring.config import LIVE_MATCH_MIN_SIMILARITY
 from proctoring.services.analyzer import ProctorAnalyzer
-from proctoring.services.identity import PhoneDetector, decode_data_url_image, decode_payload_frame
+from proctoring.services.identity import ElectronicsDetector, PhoneDetector, decode_data_url_image, decode_payload_frame
 from proctoring.services.session_analyzer import SessionAnalyzer
 from proctoring.face_match import get_arcface_verifier, load_image_from_url
 
@@ -38,6 +44,7 @@ app = FastAPI(title="ProctorShield AI Sidecar", version="1.0.0")
 
 _analyzer: ProctorAnalyzer | None = None
 _phone_detector: PhoneDetector | None = None
+_electronics_detector: ElectronicsDetector | None = None
 _session_analyzer: SessionAnalyzer | None = None
 _models_ready: bool = False
 
@@ -53,7 +60,7 @@ def get_analyzer() -> ProctorAnalyzer:
 def get_session_analyzer() -> SessionAnalyzer:
     global _session_analyzer
     if _session_analyzer is None:
-        _session_analyzer = SessionAnalyzer(get_analyzer(), get_phone_detector())
+        _session_analyzer = SessionAnalyzer(get_analyzer(), get_phone_detector(), get_electronics_detector())
     return _session_analyzer
 
 
@@ -70,6 +77,21 @@ def get_phone_detector() -> PhoneDetector:
             max_dim=PHONE_DETECTOR_MAX_DIM,
         )
     return _phone_detector
+
+
+def get_electronics_detector() -> ElectronicsDetector:
+    global _electronics_detector
+    if _electronics_detector is None:
+        log.info("Loading ElectronicsDetector (YOLO path=%s)...", ELECTRONICS_DETECTOR_MODEL_PATH)
+        _electronics_detector = ElectronicsDetector(
+            model_path=ELECTRONICS_DETECTOR_MODEL_PATH,
+            confidence=ELECTRONICS_DETECTOR_CONFIDENCE,
+            iou=ELECTRONICS_DETECTOR_IOU,
+            image_size=ELECTRONICS_DETECTOR_IMAGE_SIZE,
+            frame_skip=ELECTRONICS_DETECTOR_FRAME_SKIP,
+            max_dim=ELECTRONICS_DETECTOR_MAX_DIM,
+        )
+    return _electronics_detector
 
 
 class ImagePayload(BaseModel):
@@ -93,10 +115,13 @@ class AnalyzeSessionPayload(BaseModel):
     identity_threshold: float | None = Field(None, description="ArcFace threshold; default from config")
     phone_streak: int = Field(0, description="Prior consecutive phone-positive frames (Node state)")
     phone_active: bool = Field(False, description="Whether phone_visible already flagged")
+    electronics_streak: int = Field(0, description="Prior consecutive electronics-positive frames")
+    electronics_active: bool = Field(False, description="Whether electronics_visible already flagged")
     identity_mismatch_streak: int = Field(0, description="Prior identity mismatch streak")
     tick_index: int = Field(0, description="Monotonic tick counter from Node")
     run_identity: bool = Field(False, description="Run ArcFace this tick (expensive; default off)")
     run_phone: bool = Field(True, description="Run YOLO phone detector this tick")
+    run_electronics: bool = Field(True, description="Run custom YOLO electronics detector this tick")
     run_deep_gaze: bool | None = Field(
         None,
         description="Use RetinaNet gaze; when omitted, alternates by tick_index for speed",
@@ -129,6 +154,7 @@ def health() -> dict:
         "status": "ok",
         "service": "proctorshield-ai",
         "yolo_model": PHONE_DETECTOR_MODEL_PATH,
+        "electronics_yolo_model": ELECTRONICS_DETECTOR_MODEL_PATH,
         "models_ready": _models_ready,
     }
 
@@ -160,7 +186,12 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         deep_gaze = bool(body.run_deep_gaze)
 
     sa = get_session_analyzer()
-    core = sa.analyze_frame_core(frame, run_phone=bool(body.run_phone), deep_gaze=deep_gaze)
+    core = sa.analyze_frame_core(
+        frame,
+        run_phone=bool(body.run_phone),
+        run_electronics=bool(body.run_electronics),
+        deep_gaze=deep_gaze,
+    )
     violations = list(core["violations"])
 
     phone_flagged, phone_streak, phone_active = sa.apply_phone_streak(
@@ -169,6 +200,12 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         bool(body.phone_active),
     )
     violations.extend(phone_flagged)
+    electronics_flagged, electronics_streak, electronics_active = sa.apply_electronics_streak(
+        bool(core["electronics_detected"]),
+        int(body.electronics_streak or 0),
+        bool(body.electronics_active),
+    )
+    violations.extend(electronics_flagged)
 
     identity_match: bool | None = None
     identity_score: float | None = None
@@ -221,6 +258,8 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         "violations": violations,
         "phone_streak": phone_streak,
         "phone_active": phone_active,
+        "electronics_streak": electronics_streak,
+        "electronics_active": electronics_active,
         "identity_match": identity_match,
         "identity_score": identity_score,
         "identity_mismatch_streak": identity_mismatch_streak,
@@ -258,6 +297,20 @@ def phone_detect(body: ImagePayload) -> dict:
     pd = get_phone_detector()
     detected = pd.detect_phone(frame)
     return {"phone_detected": detected, "yolo_enabled": pd.enabled}
+
+
+@app.post("/internal/electronics-detect")
+def electronics_detect(body: ImagePayload) -> dict:
+    try:
+        frame = decode_payload_frame(body.model_dump(), key="image")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    result = get_electronics_detector().detect_electronics(frame)
+    return {
+        "electronics_detected": result["detected"],
+        "electronics_labels": result["labels"],
+        "yolo_enabled": get_electronics_detector().enabled,
+    }
 
 
 def _resolve_min_similarity(threshold: float | None) -> float:

@@ -6,3 +6,5 @@ python/**/__pycache__/
 python/.venv/
 python/.venv*/
 apps/tenant-admin-portal/.next/
+python/data/electronics/
+python/runs/

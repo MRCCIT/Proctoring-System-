@@ -44,10 +44,13 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
     identity_threshold: options.identity_threshold,
     phone_streak: state.phoneStreak,
     phone_active: state.phoneActive,
+    electronics_streak: state.electronicsStreak,
+    electronics_active: state.electronicsActive,
     identity_mismatch_streak: state.identityMismatchStreak,
     tick_index: tickIndex,
     run_identity: Boolean(options.run_identity),
     run_phone: options.run_phone !== false,
+    run_electronics: options.run_electronics !== false,
     run_deep_gaze: deepGaze,
   };
 
@@ -55,13 +58,15 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
 
   state.phoneStreak = analysis.phone_streak ?? 0;
   state.phoneActive = Boolean(analysis.phone_active);
+  state.electronicsStreak = analysis.electronics_streak ?? 0;
+  state.electronicsActive = Boolean(analysis.electronics_active);
   state.identityMismatchStreak = analysis.identity_mismatch_streak ?? 0;
   state.lastTickAt = Date.now();
 
   const violations = analysis.violations || [];
   const shouldPersist =
     options.persist &&
-    (violations.length > 0 || tickIndex % 8 === 0 || Boolean(analysis.phone_active));
+    (violations.length > 0 || tickIndex % 8 === 0 || Boolean(analysis.phone_active) || Boolean(analysis.electronics_active));
 
   let persistence = { events: 0, face_check: false, deferred: false };
   let persist_error = null;

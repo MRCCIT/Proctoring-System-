@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -253,6 +254,84 @@ class PhoneDetector:
         target_w = max(1, int(frame_w * scale))
         target_h = max(1, int(frame_h * scale))
         return cv2.resize(frame_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+
+class ElectronicsDetector:
+    """YOLO detector for the custom, labeled prohibited-electronics model.
+
+    The detector deliberately has no geometry-based fallback: a missing or invalid
+    custom model must not create electronics violations from unreliable guesses.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        confidence: float,
+        iou: float,
+        image_size: int,
+        frame_skip: int,
+        max_dim: int,
+    ) -> None:
+        self._confidence = float(confidence)
+        self._iou = float(iou)
+        self._image_size = int(image_size)
+        self._frame_skip = max(1, int(frame_skip))
+        self._max_dim = max(160, int(max_dim))
+        self._frame_counter = 0
+        self._last_detection: dict[str, Any] = {"detected": False, "labels": []}
+        self.enabled = YOLO is not None
+        self._model = None
+        if self.enabled and Path(model_path).is_file():
+            try:
+                self._model = YOLO(model_path)
+            except Exception:
+                self._model = None
+                self.enabled = False
+        elif self.enabled:
+            self.enabled = False
+
+    def detect_electronics(self, frame_bgr: np.ndarray) -> dict[str, Any]:
+        self._frame_counter += 1
+        should_infer = self._frame_counter == 1 or self._frame_counter % self._frame_skip == 0
+        if not self.enabled or self._model is None:
+            return {"detected": False, "labels": []}
+        if not should_infer:
+            return dict(self._last_detection)
+
+        frame = self._prepare_frame(frame_bgr)
+        try:
+            results = self._model.predict(
+                source=frame,
+                conf=self._confidence,
+                iou=self._iou,
+                imgsz=self._image_size,
+                verbose=False,
+            )
+        except Exception:
+            self._last_detection = {"detected": False, "labels": []}
+            return dict(self._last_detection)
+
+        labels: list[str] = []
+        if results and results[0].boxes is not None:
+            names = getattr(results[0], "names", {})
+            for class_id in results[0].boxes.cls.tolist():
+                label = str(names.get(int(class_id), class_id)) if isinstance(names, dict) else str(class_id)
+                if label not in labels:
+                    labels.append(label)
+        self._last_detection = {"detected": bool(labels), "labels": labels}
+        return dict(self._last_detection)
+
+    def _prepare_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
+        frame_h, frame_w = frame_bgr.shape[:2]
+        current_max_dim = max(frame_h, frame_w)
+        if current_max_dim <= self._max_dim:
+            return frame_bgr
+        scale = self._max_dim / float(current_max_dim)
+        return cv2.resize(
+            frame_bgr,
+            (max(1, int(frame_w * scale)), max(1, int(frame_h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
 
 
 def detect_phone_like_object(frame_bgr: np.ndarray) -> bool:

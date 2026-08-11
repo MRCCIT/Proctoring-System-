@@ -21,6 +21,10 @@ export interface ServerAiAnalysis {
   phone_detected?: boolean;
   phone_streak?: number;
   phone_active?: boolean;
+  electronics_detected?: boolean;
+  electronics_labels?: string[];
+  electronics_streak?: number;
+  electronics_active?: boolean;
   identity_match?: boolean | null;
   identity_score?: number | null;
   brightness?: number;
