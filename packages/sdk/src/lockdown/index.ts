@@ -2,6 +2,7 @@ export { LockdownEnforcer } from './LockdownEnforcer';
 export type { ViolationReason, LockdownOptions } from './LockdownEnforcer';
 export { KeyboardInterceptor } from './KeyboardInterceptor';
 export { VisibilityMonitor } from './VisibilityMonitor';
+export { WindowFocusMonitor } from './WindowFocusMonitor';
 export { ScreenCaptureBlocker } from './ScreenCaptureBlocker';
 export { ExternalAppDetector } from './ExternalAppDetector';
 export { NetworkMonitor } from './NetworkMonitor';

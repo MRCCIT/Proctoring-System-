@@ -11,6 +11,8 @@ const LABELS: Record<string, string> = {
   window_blur: 'Lost window focus',
   window_focus: 'Window focus returned',
   fullscreen_exit: 'Fullscreen exited',
+  multiple_displays_detected: 'Multiple displays detected',
+  single_display_detected: 'External display disconnected',
   no_face_detected: 'No face detected in camera',
   multiple_faces_detected: 'Multiple faces detected',
   audio_voice_detected: 'Background voice detected',

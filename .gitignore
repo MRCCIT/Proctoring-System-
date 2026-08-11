@@ -4,3 +4,5 @@ node_modules/
 .DS_Store
 python/**/__pycache__/
 python/.venv/
+python/.venv*/
+apps/tenant-admin-portal/.next/

@@ -1,6 +1,7 @@
 import { KeyboardInterceptor } from './KeyboardInterceptor';
 import { VisibilityMonitor } from './VisibilityMonitor';
 import { ScreenCaptureBlocker } from './ScreenCaptureBlocker';
+import { WindowFocusMonitor } from './WindowFocusMonitor';
 
 export type ViolationReason =
   | 'blocked_shortcut'
@@ -12,7 +13,9 @@ export type ViolationReason =
   | 'cut_attempt'
   | 'window_blur'
   | 'window_focus'
-  | 'fullscreen_exit';
+  | 'fullscreen_exit'
+  | 'multiple_displays_detected'
+  | 'single_display_detected';
 
 export interface LockdownOptions {
   blockContextMenu?: boolean;
@@ -35,8 +38,11 @@ export interface LockdownOptions {
 export class LockdownEnforcer {
   private keyboard = new KeyboardInterceptor();
   private visibility = new VisibilityMonitor();
+  private windowFocus = new WindowFocusMonitor();
   private capture = new ScreenCaptureBlocker();
   private releaseCapture: (() => void) | null = null;
+  private displayCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private lastMultiDisplay: boolean | null = null;
   private listeners: Array<() => void> = [];
   private onViolation: ((r: ViolationReason) => void) | null = null;
 
@@ -52,6 +58,27 @@ export class LockdownEnforcer {
 
     this.keyboard.start(() => this.fire('blocked_shortcut'));
     this.visibility.start((hidden) => this.fire(hidden ? 'tab_hidden' : 'tab_visible'));
+    this.windowFocus.start((focused) => this.fire(focused ? 'window_focus' : 'window_blur'));
+
+    // `screen.isExtended` is currently the browser signal available for this
+    // purpose. Check it throughout the exam so reconnecting a display is seen.
+    const checkDisplays = () => {
+      let multipleDisplays = false;
+      try {
+        multipleDisplays = Boolean(
+          (window.screen as Screen & { isExtended?: boolean }).isExtended,
+        );
+      } catch {
+        // The property is unsupported in some browsers; leave the result false.
+      }
+
+      if (multipleDisplays !== this.lastMultiDisplay) {
+        this.lastMultiDisplay = multipleDisplays;
+        this.fire(multipleDisplays ? 'multiple_displays_detected' : 'single_display_detected');
+      }
+    };
+    checkDisplays();
+    this.displayCheckTimer = setInterval(checkDisplays, 30_000);
 
     if (merged.blockContextMenu) {
       const h = (e: MouseEvent) => {
@@ -88,15 +115,6 @@ export class LockdownEnforcer {
       });
     }
 
-    const blur = () => this.fire('window_blur');
-    const focus = () => this.fire('window_focus');
-    window.addEventListener('blur', blur);
-    window.addEventListener('focus', focus);
-    this.listeners.push(() => {
-      window.removeEventListener('blur', blur);
-      window.removeEventListener('focus', focus);
-    });
-
     const fsChange = () => {
       if (!document.fullscreenElement) this.fire('fullscreen_exit');
     };
@@ -123,8 +141,12 @@ export class LockdownEnforcer {
   stop() {
     this.keyboard.stop();
     this.visibility.stop();
+    this.windowFocus.stop();
     this.releaseCapture?.();
     this.releaseCapture = null;
+    if (this.displayCheckTimer) clearInterval(this.displayCheckTimer);
+    this.displayCheckTimer = null;
+    this.lastMultiDisplay = null;
     while (this.listeners.length) this.listeners.pop()?.();
     this.onViolation = null;
   }
