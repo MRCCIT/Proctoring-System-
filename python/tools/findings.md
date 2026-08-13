@@ -59,5 +59,18 @@ No Screenshots
 Multiple Monitors
 Talview
 
-Ask tech team for github access
-Get docker
+---
+
+# Electronics YOLO evaluation (summary)
+
+Validation results (per-class excerpt):
+
+                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95)
+                   all         49         49      0.952      0.652      0.916      0.751
+           Smart Phone          4          4          1          0      0.781      0.658
+                Tablet         44         44       0.91      0.955      0.972      0.798
+                  iPad          1          1      0.948          1      0.995      0.796
+
+Notes:
+- `Tablet` class performs very well (high recall and precision) across the validation set.
+- Has 91% Percision which is fairly good
