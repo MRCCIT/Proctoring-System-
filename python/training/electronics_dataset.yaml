@@ -1,13 +1,12 @@
 # Dataset layout expected by Ultralytics YOLO. Keep images and labels out of Git.
 path: ../data/electronics
-train: images/train
-val: images/val
-# Optional, recommended only when labels are finalized:
-# test: images/test
+train: train/images
+val: valid/images
+test: test/images
 
 # Keep this list in exactly the same order as the class IDs in your YOLO labels.
 names:
-  0: tablet
-  1: laptop
-  2: e_reader
-  3: calculator
+  0: Smart Phone
+  1: Tablet
+  2: Tablet-and-Smart-phone
+  3: iPad

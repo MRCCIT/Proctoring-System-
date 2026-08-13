@@ -1,5 +1,6 @@
 import { query } from '../../config/database.js';
 import { assertSessionForTenant } from '../sdk/candidateSessions.js';
+import { insertSnapshotEvidence, stripDataUrl } from '../tenant/recording.js';
 
 function mapViolationToEvent(v) {
   const severity = v.includes('phone') ? 'flag' : 'warn';
@@ -48,7 +49,7 @@ function shouldEmit(sessionId, violationKey, cooldownMs = 8000) {
   return true;
 }
 
-export async function persistUnifiedProctorTick(tenantId, sessionId, analysis, options = {}) {
+export async function persistUnifiedProctorTick(tenantId, sessionId, analysis, imageDataUrl = null, options = {}) {
   const row = await assertSessionForTenant(tenantId, sessionId);
   if (!row) return { events: 0, face_check: false };
 
@@ -105,6 +106,25 @@ export async function persistUnifiedProctorTick(tenantId, sessionId, analysis, o
        WHERE id = $2 AND tenant_id = $3`,
       [violsForFace.length, sessionId, tenantId]
     );
+  }
+
+  // If we have an image data URL and face/ai violations, persist a snapshot for proctors
+  try {
+    if (imageDataUrl && violsForFace.length) {
+      const image_base64 = stripDataUrl(imageDataUrl);
+      const electronics_labels = Array.isArray(analysis.electronics_labels) ? analysis.electronics_labels : [];
+      await insertSnapshotEvidence(tenantId, sessionId, {
+        image_base64,
+        caption: `AI violation: ${violsForFace.join(',')}` + (electronics_labels.length ? ` · labels: ${electronics_labels.join(',')}` : ''),
+        label: 'ai_violation',
+        violation_context: { violations: violsForFace, gaze: analysis.gaze_direction, electronics: electronics_labels },
+        mime_type: 'image/jpeg',
+        source: 'server_ai',
+      });
+    }
+  } catch (e) {
+    /* non-fatal if snapshot persistence fails */
+    console.error('[persistUnifiedProctorTick] snapshot persist failed', e && e.message ? e.message : e);
   }
 
   return { events, face_check: shouldLogFace };

@@ -72,7 +72,8 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
   let persist_error = null;
   if (shouldPersist) {
     persistence = { events: 0, face_check: false, deferred: true };
-    void persistUnifiedProctorTick(tenantId, sessionId, analysis)
+    // pass the original image data URL so the persistence layer can store a snapshot
+    void persistUnifiedProctorTick(tenantId, sessionId, analysis, imageDataUrl)
       .then((p) => {
         persistence = { ...p, deferred: false };
       })
