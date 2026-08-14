@@ -48,8 +48,8 @@ class ArcFaceVerifier:
                 ]
             )
             logger.info("ArcFace (InceptionResnetV1) loaded successfully")
-        except Exception as e:  # pragma: no cover
-            logger.error("Model initialization failed: %s", e)
+        except Exception:  # pragma: no cover
+            logger.exception("Model initialization failed during ArcFace setup")
             self.model = None
 
     @property

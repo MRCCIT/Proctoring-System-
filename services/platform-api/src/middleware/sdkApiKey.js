@@ -40,5 +40,6 @@ export const requireSdkApiKey = asyncHandler(async (req, res, next) => {
   }
   req.sdkTenant = tenant;
   req.sdkTenantId = tenant.id;
+  console.debug('[sdk] X-API-Key validated', { tenantId: tenant.id, tenantSlug: tenant.slug, apiKeyPrefix: tenant.api_key_prefix });
   next();
 });

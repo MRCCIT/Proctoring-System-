@@ -21,7 +21,7 @@ python/data/electronics/
   labels/train/  labels/val/  [labels/test/]
 ```
 
-The class IDs must match `electronics_dataset.yaml`. Adjust that file before labeling if the final class set changes. Recommended initial classes: `tablet`, `laptop`, `e_reader`, `calculator`. Do not use a `phone` class here: phone detection remains the responsibility of the existing model, avoiding duplicate violations.
+The class IDs must match `electronics_dataset.yaml`. The imported dataset uses `Smart Phone`, `Tablet`, `Tablet-and-Smart-phone`, and `iPad`. All four remain in training because a mixed tablet/phone image is useful training data, but runtime only flags labels containing `tablet` or `ipad`; phone-only labels remain the responsibility of the existing model. This filtering is configurable with `ELECTRONICS_DETECTOR_LABEL_TOKENS`.
 
 Include negative images (no prohibited electronics), real proctoring camera angles, varied lighting, partial occlusion, held devices, background screens, and ordinary permitted objects. Keep candidates separate by person/session so near-duplicate frames cannot leak between train and validation sets.
 

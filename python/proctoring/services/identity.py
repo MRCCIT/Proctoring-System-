@@ -6,6 +6,9 @@ from typing import Any
 
 import cv2
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 from proctoring.domain.models import RegisteredUser
 
@@ -13,6 +16,7 @@ try:
     from ultralytics import YOLO
 except ImportError:  # pragma: no cover - optional runtime dependency.
     YOLO = None
+    logger.warning("ultralytics.YOLO not available; YOLO detectors disabled")
 
 
 def decode_data_url_image(data_url: str) -> np.ndarray:
@@ -24,7 +28,8 @@ def decode_data_url_image(data_url: str) -> np.ndarray:
     nparr = np.frombuffer(img_bytes, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
-        raise ValueError("Could not decode frame")
+        logger.debug("Failed to decode image: %d bytes", len(img_bytes))
+        raise ValueError(f"Could not decode frame (decoded {len(img_bytes)} bytes)")
     return frame
 
 
@@ -186,6 +191,7 @@ class PhoneDetector:
                 self._model = YOLO(model_path)
                 self._class_ids = self._resolve_phone_class_ids()
             except Exception:
+                logger.exception("Failed to initialize PhoneDetector YOLO model: %s", model_path)
                 self._model = None
                 self.enabled = False
                 self._class_ids = None
@@ -213,6 +219,7 @@ class PhoneDetector:
                 verbose=False,
             )
         except Exception:
+            logger.exception("PhoneDetector predict failed")
             self._last_detected = detect_phone_like_object(frame_bgr)
             self._last_infer_frame = self._frame_counter
             return self._last_detected
@@ -271,6 +278,7 @@ class ElectronicsDetector:
         image_size: int,
         frame_skip: int,
         max_dim: int,
+        label_tokens: tuple[str, ...],
     ) -> None:
         self._confidence = float(confidence)
         self._iou = float(iou)
@@ -278,6 +286,7 @@ class ElectronicsDetector:
         self._frame_skip = max(1, int(frame_skip))
         self._max_dim = max(160, int(max_dim))
         self._frame_counter = 0
+        self._label_tokens = tuple(token.lower() for token in label_tokens)
         self._last_detection: dict[str, Any] = {"detected": False, "labels": []}
         self.enabled = YOLO is not None
         self._model = None
@@ -285,6 +294,7 @@ class ElectronicsDetector:
             try:
                 self._model = YOLO(model_path)
             except Exception:
+                logger.exception("Failed to initialize ElectronicsDetector YOLO model: %s", model_path)
                 self._model = None
                 self.enabled = False
         elif self.enabled:
@@ -308,6 +318,7 @@ class ElectronicsDetector:
                 verbose=False,
             )
         except Exception:
+            logger.exception("ElectronicsDetector predict failed")
             self._last_detection = {"detected": False, "labels": []}
             return dict(self._last_detection)
 
@@ -316,10 +327,13 @@ class ElectronicsDetector:
             names = getattr(results[0], "names", {})
             for class_id in results[0].boxes.cls.tolist():
                 label = str(names.get(int(class_id), class_id)) if isinstance(names, dict) else str(class_id)
-                if label not in labels:
+                if self._is_electronics_label(label) and label not in labels:
                     labels.append(label)
         self._last_detection = {"detected": bool(labels), "labels": labels}
         return dict(self._last_detection)
+
+    def _is_electronics_label(self, label: str) -> bool:
+        return any(token in label.lower() for token in self._label_tokens)
 
     def _prepare_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
         frame_h, frame_w = frame_bgr.shape[:2]

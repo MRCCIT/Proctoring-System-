@@ -38,6 +38,12 @@ ELECTRONICS_DETECTOR_IMAGE_SIZE = int(os.getenv("ELECTRONICS_DETECTOR_IMAGE_SIZE
 ELECTRONICS_DETECTOR_FRAME_SKIP = int(os.getenv("ELECTRONICS_DETECTOR_FRAME_SKIP", "1"))
 ELECTRONICS_DETECTOR_MAX_DIM = int(os.getenv("ELECTRONICS_DETECTOR_MAX_DIM", "960"))
 ELECTRONICS_VISIBLE_STREAK_THRESHOLD = int(os.getenv("ELECTRONICS_VISIBLE_STREAK_THRESHOLD", "1"))
+# Exclude phone-only class names: the dedicated COCO phone model owns that alert.
+ELECTRONICS_DETECTOR_LABEL_TOKENS = tuple(
+    token.strip().lower()
+    for token in os.getenv("ELECTRONICS_DETECTOR_LABEL_TOKENS", "tablet,ipad").split(",")
+    if token.strip()
+)
 INFERENCE_MAX_WIDTH = int(os.getenv("INFERENCE_MAX_WIDTH", "480"))
 DEEP_GAZE_EVERY_N_TICKS = int(os.getenv("DEEP_GAZE_EVERY_N_TICKS", "2"))
 

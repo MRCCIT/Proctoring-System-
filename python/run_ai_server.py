@@ -30,6 +30,7 @@ from proctoring.config import (
     ELECTRONICS_DETECTOR_IOU,
     ELECTRONICS_DETECTOR_MAX_DIM,
     ELECTRONICS_DETECTOR_MODEL_PATH,
+    ELECTRONICS_DETECTOR_LABEL_TOKENS,
 )
 from proctoring.config import LIVE_MATCH_MIN_SIMILARITY
 from proctoring.services.analyzer import ProctorAnalyzer
@@ -90,6 +91,7 @@ def get_electronics_detector() -> ElectronicsDetector:
             image_size=ELECTRONICS_DETECTOR_IMAGE_SIZE,
             frame_skip=ELECTRONICS_DETECTOR_FRAME_SKIP,
             max_dim=ELECTRONICS_DETECTOR_MAX_DIM,
+            label_tokens=ELECTRONICS_DETECTOR_LABEL_TOKENS,
         )
     return _electronics_detector
 

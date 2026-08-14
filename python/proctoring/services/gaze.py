@@ -6,6 +6,9 @@ from typing import Any
 
 import cv2
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,7 +81,11 @@ class EyeGazeDetector:
             try:
                 self._model = torch.jit.load(str(path), map_location="cpu")
             except Exception:
-                checkpoint = torch.load(str(path), map_location="cpu")
+                try:
+                    checkpoint = torch.load(str(path), map_location="cpu")
+                except Exception:
+                    logger.exception("Failed to load retinanet checkpoint from %s", str(path))
+                    raise
                 if hasattr(checkpoint, "eval"):
                     self._model = checkpoint
                 elif isinstance(checkpoint, dict) and hasattr(checkpoint.get("model"), "eval"):
@@ -90,6 +97,7 @@ class EyeGazeDetector:
                 self._model.eval()
                 self._retinanet_enabled = True
         except Exception:
+            logger.exception("RetinaNet model load failed for %s", str(path))
             self._model = None
             self._retinanet_enabled = False
 
@@ -107,6 +115,7 @@ class EyeGazeDetector:
             model.load_state_dict(state_dict, strict=False)
             return model
         except Exception:
+            logger.exception("Failed to build RetinaNet from checkpoint")
             return None
 
     def _analyze_with_retinanet(self, frame_bgr: np.ndarray) -> GazeResult | None:
@@ -143,6 +152,7 @@ class EyeGazeDetector:
             away = direction not in {"center", "forward"}
             return GazeResult(direction=direction, score=score, away=away, detector="retinanet")
         except Exception:
+            logger.exception("RetinaNet analysis failed")
             return None
 
     def _analyze_with_landmarks(self, landmarks: Any) -> GazeResult | None:
