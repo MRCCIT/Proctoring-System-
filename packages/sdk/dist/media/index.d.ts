@@ -1,4 +1,4 @@
-import { P as ProctorShieldClient } from '../ProctorShieldClient-DAMa3Xag.js';
+import { P as ProctorShieldClient } from '../ProctorShieldClient-B8list-d.js';
 export { A as AcquiredStreams, P as PermissionKind, a as PermissionManager, b as PermissionState, c as PermissionStatus } from '../PermissionManager--3wybVk2.js';
 
 declare class WebRTCManager {
@@ -51,16 +51,28 @@ declare class ChunkedRecorder {
     private recorder;
     private sequence;
     private currentChunkStart;
-    private buffer;
+    private mimeType;
+    private stopResolve;
     constructor(opts: ChunkedRecorderOptions);
     start(stream: MediaStream): void;
-    stop(): void;
+    /** Flush the final timeslice and wait for upload before session teardown. */
+    stop(): Promise<void>;
 }
 /**
- * Helper: builds an onChunk handler that signals chunk metadata to the API.
- * Object storage upload is left to the integrator (presigned URL, etc.).
+ * Helper: builds an onChunk handler that uploads each chunk's bytes to the
+ * platform API as base64. The API persists them under STORAGE_DIR so the
+ * tenant admin can play them back later.
+ *
+ * Skips the payload for chunks larger than `maxBytes` (default 12 MB) and
+ * just signals metadata so we never break the JSON body limit.
  */
-declare function buildChunkSignaler(client: ProctorShieldClient, sessionId: string): ({ blob, sequence, track, startedAt, endedAt, }: {
+interface ChunkSignalerOptions {
+    /** Skip the binary payload above this size; default 12 MB */
+    maxBytes?: number;
+    /** Send only metadata, no binary payload */
+    metadataOnly?: boolean;
+}
+declare function buildChunkSignaler(client: ProctorShieldClient, sessionId: string, opts?: ChunkSignalerOptions): ({ blob, sequence, track, startedAt, endedAt, }: {
     blob: Blob;
     sequence: number;
     track: RecordingTrack;

@@ -46,11 +46,13 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
     phone_active: state.phoneActive,
     electronics_streak: state.electronicsStreak,
     electronics_active: state.electronicsActive,
+    multiple_face_streak: state.multipleFaceStreak,
+    multiple_face_active: state.multipleFaceActive,
     identity_mismatch_streak: state.identityMismatchStreak,
     tick_index: tickIndex,
     run_identity: Boolean(options.run_identity),
     run_phone: options.run_phone !== false,
-    run_electronics: options.run_electronics !== false,
+    run_electronics: options.run_electronics === true,
     run_deep_gaze: deepGaze,
   };
 
@@ -60,6 +62,8 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
   state.phoneActive = Boolean(analysis.phone_active);
   state.electronicsStreak = analysis.electronics_streak ?? 0;
   state.electronicsActive = Boolean(analysis.electronics_active);
+  state.multipleFaceStreak = analysis.multiple_face_streak ?? 0;
+  state.multipleFaceActive = Boolean(analysis.multiple_face_active);
   state.identityMismatchStreak = analysis.identity_mismatch_streak ?? 0;
   state.lastTickAt = Date.now();
 

@@ -12,6 +12,7 @@ import numpy as np
 from proctoring.config import (
     ELECTRONICS_VISIBLE_STREAK_THRESHOLD,
     LOW_LIGHT_MEAN_THRESHOLD,
+    MULTIPLE_FACES_STREAK_THRESHOLD,
     PHONE_VISIBLE_STREAK_THRESHOLD,
 )
 from proctoring.domain.models import AnalysisResult
@@ -52,7 +53,11 @@ class SessionAnalyzer:
             violations.append("low_lighting")
 
         phone_detected = self.phone_detector.detect_phone(frame_bgr) if run_phone else False
-        electronics = self.electronics_detector.detect_electronics(frame_bgr) if run_electronics else {"detected": False, "labels": []}
+        electronics = (
+            self.electronics_detector.detect_electronics(frame_bgr)
+            if run_electronics
+            else {"detected": False, "labels": [], "fresh": False}
+        )
 
         return {
             "face_count": result.face_count,
@@ -66,6 +71,7 @@ class SessionAnalyzer:
             "phone_yolo_enabled": self.phone_detector.enabled,
             "electronics_detected": bool(electronics["detected"]),
             "electronics_labels": electronics["labels"],
+            "electronics_fresh": bool(electronics.get("fresh")),
             "electronics_yolo_enabled": self.electronics_detector.enabled,
         }
 
@@ -85,9 +91,30 @@ class SessionAnalyzer:
             active = False
         return flagged, streak, active
 
-    def apply_electronics_streak(
-        self, electronics_detected: bool, electronics_streak: int, electronics_active: bool
+    def apply_multiple_face_streak(
+        self, face_count: int, multiple_face_streak: int, multiple_face_active: bool
     ) -> tuple[list[str], int, bool]:
+        detected = face_count > 1
+        streak = multiple_face_streak + 1 if detected else 0
+        active = multiple_face_active
+        flagged: list[str] = []
+        if detected and streak >= MULTIPLE_FACES_STREAK_THRESHOLD and not active:
+            flagged.append("multiple_faces_detected")
+            active = True
+        if not detected:
+            active = False
+        return flagged, streak, active
+
+    def apply_electronics_streak(
+        self,
+        electronics_detected: bool,
+        electronics_streak: int,
+        electronics_active: bool,
+        *,
+        fresh: bool = True,
+    ) -> tuple[list[str], int, bool]:
+        if not fresh:
+            return [], electronics_streak, electronics_active
         streak = electronics_streak + 1 if electronics_detected else 0
         active = electronics_active
         flagged: list[str] = []

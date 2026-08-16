@@ -14,7 +14,6 @@
     "verbatimModuleSyntax": false,
     "resolveJsonModule": true,
     "noEmit": false,
-    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
       "@proctorshield/shared-types": ["../shared-types/src/index.ts"]

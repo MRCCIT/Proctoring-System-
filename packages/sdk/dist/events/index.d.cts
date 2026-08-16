@@ -1,4 +1,4 @@
-import { P as ProctorShieldClient } from '../ProctorShieldClient-DAMa3Xag.cjs';
+import { P as ProctorShieldClient } from '../ProctorShieldClient-B8list-d.cjs';
 export { C as ChatMessage, P as ProctorChatClient, a as ProctorChatClientOptions } from '../ProctorChatClient-BaqzF393.cjs';
 
 type SdkEventType = 'session.initialized' | 'violation.detected' | 'identity.verified' | 'stream.started' | 'session.ended';

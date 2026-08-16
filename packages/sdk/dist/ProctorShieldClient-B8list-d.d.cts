@@ -300,6 +300,21 @@ declare class ProctorShieldClient {
     postSnapshot(sessionId: string, body: Record<string, unknown>): Promise<{
         data: unknown;
     }>;
+    getIdentityReference(sessionId: string): Promise<{
+        data: {
+            candidate: {
+                id: string;
+                email?: string;
+                name?: string;
+                external_ref?: string;
+            } | null;
+            enrolled: boolean;
+            mime_type?: string;
+            bytes?: number;
+            data_url: string | null;
+            reason?: string;
+        };
+    }>;
     postCandidateChat(sessionId: string, message: string): Promise<{
         data: unknown;
     }>;
@@ -309,6 +324,18 @@ declare class ProctorShieldClient {
     getTurnCredentials(): Promise<{
         data: unknown;
     }>;
+    /** Unified ~1 Hz proctor tick: face, gaze, phone streak, identity (Python microservices). */
+    monitorTickAi(sessionId: string, imageDataUrl: string, persist?: boolean, body?: {
+        reference_image?: string;
+        identity_threshold?: number;
+        load_reference?: boolean;
+    }): Promise<{
+        data: {
+            analysis: Record<string, unknown>;
+            persistence?: unknown;
+            state?: unknown;
+        };
+    }>;
     analyzeFrameAi(sessionId: string, imageDataUrl: string, persist?: boolean): Promise<unknown>;
     phoneCheckAi(sessionId: string, imageDataUrl: string, persist?: boolean): Promise<unknown>;
     faceCompareAi(sessionId: string, body: {
@@ -316,6 +343,8 @@ declare class ProctorShieldClient {
         live_image?: string;
         profile_url?: string;
         live_url?: string;
+        /** Minimum ArcFace similarity 0–100; default 62 */
+        identity_threshold?: number;
     }): Promise<unknown>;
 }
 

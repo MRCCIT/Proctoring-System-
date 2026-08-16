@@ -25,7 +25,7 @@ export async function setAiDegradationLevel(level) {
 /**
  * Level 0: full AI
  * Level 1: skip ArcFace identity
- * Level 2: skip phone + deep gaze
+ * Level 2: skip phone + electronics + deep gaze
  * Level 3: skip server AI (client-only)
  */
 export async function applyDegradationToTickOptions(options = {}) {
@@ -34,7 +34,7 @@ export async function applyDegradationToTickOptions(options = {}) {
     return { ...options, skipServerAi: true };
   }
   if (level >= 2) {
-    return { ...options, run_phone: false, run_deep_gaze: false };
+    return { ...options, run_phone: false, run_electronics: false, run_deep_gaze: false };
   }
   if (level >= 1) {
     return { ...options, run_identity: false };

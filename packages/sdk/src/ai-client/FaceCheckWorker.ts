@@ -48,10 +48,10 @@ self.heuristicFaceCount = function(bitmap) {
     }
     if (edges > 4) strongRows++;
   }
-  // Map "rows with edges" to a coarse face_count estimate.
+  // This fallback is presence-only. Edge density cannot reliably distinguish
+  // a close-up face from multiple people.
   if (strongRows < 4) return 0;
-  if (strongRows < 18) return 1;
-  return 2;
+  return 1;
 };
 
 self.analyzeBitmap = async function(bitmap) {

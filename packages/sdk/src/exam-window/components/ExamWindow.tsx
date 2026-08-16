@@ -470,7 +470,12 @@ export function ExamWindow(props: ExamWindowProps) {
     chatRef.current = null;
   }, []);
 
-  useEffect(() => () => tearDown(), [tearDown]);
+  useEffect(
+    () => () => {
+      void tearDown();
+    },
+    [tearDown]
+  );
 
   const endExam = async () => {
     if (!sessionId) return;

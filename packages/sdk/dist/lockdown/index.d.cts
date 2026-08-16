@@ -1,4 +1,4 @@
-type ViolationReason = 'blocked_shortcut' | 'tab_hidden' | 'tab_visible' | 'context_menu' | 'copy_attempt' | 'paste_attempt' | 'cut_attempt' | 'window_blur' | 'window_focus' | 'fullscreen_exit';
+type ViolationReason = 'blocked_shortcut' | 'tab_hidden' | 'tab_visible' | 'context_menu' | 'copy_attempt' | 'paste_attempt' | 'cut_attempt' | 'window_blur' | 'window_focus' | 'fullscreen_exit' | 'multiple_displays_detected' | 'single_display_detected';
 interface LockdownOptions {
     blockContextMenu?: boolean;
     blockCopyPaste?: boolean;
@@ -19,8 +19,11 @@ interface LockdownOptions {
 declare class LockdownEnforcer {
     private keyboard;
     private visibility;
+    private windowFocus;
     private capture;
     private releaseCapture;
+    private displayCheckTimer;
+    private lastMultiDisplay;
     private listeners;
     private onViolation;
     start(onViolation?: (r: ViolationReason) => void, opts?: LockdownOptions): void;
@@ -37,6 +40,13 @@ declare class KeyboardInterceptor {
 declare class VisibilityMonitor {
     private handler;
     start(onChange: (hidden: boolean) => void): void;
+    stop(): void;
+}
+
+declare class WindowFocusMonitor {
+    private blurHandler;
+    private focusHandler;
+    start(onChange: (focused: boolean) => void): void;
     stop(): void;
 }
 
@@ -96,4 +106,4 @@ declare class KeystrokeAnalyzer {
     stop(): void;
 }
 
-export { ExternalAppDetector, KeyboardInterceptor, KeystrokeAnalyzer, type KeystrokeAnomaly, LockdownEnforcer, type LockdownOptions, NetworkMonitor, type NetworkSnapshot, ScreenCaptureBlocker, type ViolationReason, VisibilityMonitor };
+export { ExternalAppDetector, KeyboardInterceptor, KeystrokeAnalyzer, type KeystrokeAnomaly, LockdownEnforcer, type LockdownOptions, NetworkMonitor, type NetworkSnapshot, ScreenCaptureBlocker, type ViolationReason, VisibilityMonitor, WindowFocusMonitor };

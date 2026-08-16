@@ -41,4 +41,8 @@ yolo detect val model=runs/electronics/train/weights/best.pt data=training/elect
 
 Copy the approved `best.pt` to `python/models/electronics_yolo.pt` (or set `ELECTRONICS_YOLO_MODEL_PATH`). Restart the AI sidecar. The `/health` response reports the configured model path, and each unified `/internal/analyze-session` response includes `electronics_detected`, `electronics_labels`, and `electronics_yolo_enabled`.
 
-Tune runtime behavior with `ELECTRONICS_DETECTOR_CONFIDENCE` (default `0.35`), `ELECTRONICS_DETECTOR_IOU` (default `0.45`), and `ELECTRONICS_VISIBLE_STREAK_THRESHOLD` (default `1`). Begin with a higher confidence threshold in a staged environment to minimize false-positive proctoring flags.
+Tune runtime behavior with `ELECTRONICS_DETECTOR_CONFIDENCE` (default `0.50`),
+`ELECTRONICS_DETECTOR_IOU` (default `0.45`), `ELECTRONICS_DETECTOR_FRAME_SKIP`
+(default `5`), and `ELECTRONICS_VISIBLE_STREAK_THRESHOLD` (default `2`).
+Unified monitoring keeps the custom detector off unless `run_electronics=true` is
+explicitly requested. Enable it first in staging to measure false positives and latency.

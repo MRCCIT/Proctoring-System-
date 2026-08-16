@@ -119,6 +119,8 @@ class AnalyzeSessionPayload(BaseModel):
     phone_active: bool = Field(False, description="Whether phone_visible already flagged")
     electronics_streak: int = Field(0, description="Prior consecutive electronics-positive frames")
     electronics_active: bool = Field(False, description="Whether electronics_visible already flagged")
+    multiple_face_streak: int = Field(0, description="Prior consecutive accepted multi-face frames")
+    multiple_face_active: bool = Field(False, description="Whether multiple_faces_detected already flagged")
     identity_mismatch_streak: int = Field(0, description="Prior identity mismatch streak")
     tick_index: int = Field(0, description="Monotonic tick counter from Node")
     run_identity: bool = Field(False, description="Run ArcFace this tick (expensive; default off)")
@@ -194,7 +196,13 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         run_electronics=bool(body.run_electronics),
         deep_gaze=deep_gaze,
     )
-    violations = list(core["violations"])
+    violations = [item for item in core["violations"] if item != "multiple_faces_detected"]
+    multiple_face_flagged, multiple_face_streak, multiple_face_active = sa.apply_multiple_face_streak(
+        int(core["face_count"]),
+        int(body.multiple_face_streak or 0),
+        bool(body.multiple_face_active),
+    )
+    violations.extend(multiple_face_flagged)
 
     phone_flagged, phone_streak, phone_active = sa.apply_phone_streak(
         bool(core["phone_detected"]),
@@ -206,6 +214,7 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         bool(core["electronics_detected"]),
         int(body.electronics_streak or 0),
         bool(body.electronics_active),
+        fresh=bool(core.get("electronics_fresh")),
     )
     violations.extend(electronics_flagged)
 
@@ -262,6 +271,8 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         "phone_active": phone_active,
         "electronics_streak": electronics_streak,
         "electronics_active": electronics_active,
+        "multiple_face_streak": multiple_face_streak,
+        "multiple_face_active": multiple_face_active,
         "identity_match": identity_match,
         "identity_score": identity_score,
         "identity_mismatch_streak": identity_mismatch_streak,

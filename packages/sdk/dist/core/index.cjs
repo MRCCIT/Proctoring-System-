@@ -392,6 +392,9 @@ var ProctorShieldClient = class {
   postSnapshot(sessionId, body) {
     return this.request("POST", `/v1/sdk/sessions/${sessionId}/snapshots`, body);
   }
+  getIdentityReference(sessionId) {
+    return this.request("GET", `/v1/sdk/sessions/${sessionId}/identity-reference`);
+  }
   postCandidateChat(sessionId, message) {
     return this.request("POST", `/v1/sdk/sessions/${sessionId}/chat`, { message });
   }
@@ -403,6 +406,14 @@ var ProctorShieldClient = class {
   }
   getTurnCredentials() {
     return this.request("GET", "/v1/sdk/turn-credentials");
+  }
+  /** Unified ~1 Hz proctor tick: face, gaze, phone streak, identity (Python microservices). */
+  monitorTickAi(sessionId, imageDataUrl, persist = false, body = {}) {
+    return this.request(
+      "POST",
+      `/v1/sdk/sessions/${sessionId}/ai/monitor-tick${persist ? "?persist=1" : ""}`,
+      { image: imageDataUrl, ...body }
+    );
   }
   analyzeFrameAi(sessionId, imageDataUrl, persist = false) {
     return this.request("POST", `/v1/sdk/sessions/${sessionId}/ai/analyze-frame${persist ? "?persist=1" : ""}`, {

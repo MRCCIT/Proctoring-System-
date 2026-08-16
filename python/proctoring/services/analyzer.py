@@ -16,9 +16,14 @@ from proctoring.config import (
     EYE_GAZE_CENTER_MIN,
     EYE_GAZE_RETINANET_CONFIDENCE,
     EYE_GAZE_RETINANET_MODEL_PATH,
+    FACE_MIN_BOX_AREA_RATIO,
+    FACE_MIN_DETECTION_CONFIDENCE,
+    FACE_MODEL_SELECTION,
+    FACE_NMS_IOU,
     SIDEWAYS_THRESHOLD,
 )
 from proctoring.domain.models import AnalysisResult
+from proctoring.services.face_detections import filter_face_detections
 from proctoring.services.gaze import EyeGazeDetector
 
 
@@ -46,8 +51,8 @@ class ProctorAnalyzer:
             return
 
         self.face_detection = _mp_solutions.face_detection.FaceDetection(
-            model_selection=1,
-            min_detection_confidence=0.5,
+            model_selection=FACE_MODEL_SELECTION,
+            min_detection_confidence=FACE_MIN_DETECTION_CONFIDENCE,
         )
         self.face_mesh = _mp_solutions.face_mesh.FaceMesh(
             max_num_faces=1,
@@ -72,8 +77,20 @@ class ProctorAnalyzer:
                 gaze_detector=gaze_result.detector if gaze_result else None,
             )
 
-        detections = self.face_detection.process(frame_rgb).detections or []
+        raw_detections = self.face_detection.process(frame_rgb).detections or []
+        detections = filter_face_detections(
+            raw_detections,
+            min_confidence=FACE_MIN_DETECTION_CONFIDENCE,
+            min_area_ratio=FACE_MIN_BOX_AREA_RATIO,
+            nms_iou=FACE_NMS_IOU,
+        )
         face_count = len(detections)
+        if len(raw_detections) != face_count:
+            self.logger.debug(
+                "Face detections filtered: raw=%d accepted=%d",
+                len(raw_detections),
+                face_count,
+            )
 
         violations: list[str] = []
         if face_count == 0:

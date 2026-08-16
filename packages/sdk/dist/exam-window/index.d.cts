@@ -1,6 +1,6 @@
 import * as react_jsx_runtime from 'react/jsx-runtime';
 import { a as PermissionManager } from '../PermissionManager--3wybVk2.cjs';
-import { P as ProctorShieldClient, S as SdkSessionInitResponse } from '../ProctorShieldClient-DAMa3Xag.cjs';
+import { P as ProctorShieldClient, S as SdkSessionInitResponse } from '../ProctorShieldClient-B8list-d.cjs';
 import { P as ProctorChatClient } from '../ProctorChatClient-BaqzF393.cjs';
 
 interface ExamWindowBranding {
@@ -28,6 +28,25 @@ interface ExamWindowProps {
     disableScreenRecording?: boolean;
     /** ms between face checks; default 10000 */
     faceCheckIntervalMs?: number;
+    /**
+     * Enable the Python AI sidecar tier (analyze-frame + phone-check).
+     * Default true — disable only when no AI server is deployed.
+     */
+    serverAi?: boolean;
+    /** Minimum gap between analyze-frame calls per session; default 30s */
+    analyzeMinIntervalMs?: number;
+    /** Minimum gap between phone-check calls per session; default 60s */
+    phoneCheckMinIntervalMs?: number;
+    /** Optional reference photo (data URL/base64) for ArcFace identity match */
+    identityReferenceImage?: string;
+    /** Optional reference photo URL for ArcFace identity match */
+    identityReferenceUrl?: string;
+    /** Continuously face-match the candidate against the enrolled reference every interval; default true */
+    continuousIdentityCheck?: boolean;
+    /** ms between continuous identity checks; default 10_000 */
+    identityCheckIntervalMs?: number;
+    /** Minimum ArcFace similarity during exam (0–100); default 55 */
+    identityThreshold?: number;
     /** Called when session ends */
     onSessionEnd?: (sessionId: string) => void;
     /** Optional children rendered inside the exam area instead of the iframe */
@@ -66,6 +85,8 @@ interface SystemCheckRunnerProps {
     /** URL to probe latency against; pass your API base */
     probeUrl?: string;
     brandPrimary?: string;
+    /** Called when a live camera/mic stream is confirmed (including auto-acquire fallback). */
+    onStreamAcquired?: (stream: MediaStream) => void;
     onComplete: (r: SystemCheckResult) => void;
 }
 declare function SystemCheckRunner(props: SystemCheckRunnerProps): react_jsx_runtime.JSX.Element;
@@ -76,8 +97,19 @@ interface IdentityVerificationProps {
     /** Camera stream from the permission gate */
     cameraStream: MediaStream | null;
     brandPrimary?: string;
+    /** Optional: reference photo as a data URL/base64 (e.g. uploaded ID photo) */
+    referenceImage?: string;
+    /** Optional: reference photo HTTP URL (signed, fetched by the Python sidecar) */
+    referenceUrl?: string;
+    /** Minimum ArcFace similarity (0–100 scale); default 55 */
+    minSimilarity?: number;
     onDone: (info: {
         image_base64: string;
+        match?: {
+            similarity: number;
+            verified: boolean;
+            detector: string;
+        };
     }) => void;
 }
 declare function IdentityVerification(props: IdentityVerificationProps): react_jsx_runtime.JSX.Element;
@@ -117,6 +149,11 @@ interface ProctoringIndicatorProps {
     online: boolean;
     brandPrimary?: string;
     paused?: boolean;
+    /** Last unified Python AI tick summary */
+    aiStatus?: {
+        ok: boolean;
+        label: string;
+    } | null;
 }
 declare function ProctoringIndicator(props: ProctoringIndicatorProps): react_jsx_runtime.JSX.Element;
 

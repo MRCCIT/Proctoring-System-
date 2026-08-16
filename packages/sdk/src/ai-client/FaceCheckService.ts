@@ -90,6 +90,7 @@ export class FaceCheckService {
   private opts: Resolved;
   private monitorThrottle: AiSidecarThrottle;
   private localCheckCount = 0;
+  private localMultiFaceStreak = 0;
   private currentVideo: HTMLVideoElement | null = null;
 
   constructor(
@@ -197,10 +198,16 @@ export class FaceCheckService {
         if (res) {
           const violations: string[] = [];
           if (res.face_count === 0) violations.push('no_face_detected');
-          if (res.face_count > 1) violations.push('multiple_faces_detected');
+          const trustedMultiFace = res.detector === 'native_FaceDetector' && res.face_count > 1;
+          this.localMultiFaceStreak = trustedMultiFace ? this.localMultiFaceStreak + 1 : 0;
+          if (!this.opts.serverAi && this.localMultiFaceStreak >= 2) {
+            violations.push('multiple_faces_detected');
+          }
           const result: FaceCheckResult = { ...res, violations };
           this.enqueueLocal(result);
-          if (this.opts.serverAi && violations.length) void this.runServerAi('suspicious');
+          if (this.opts.serverAi && violations.includes('no_face_detected')) {
+            void this.runServerAi('suspicious');
+          }
           return;
         }
       }
@@ -208,7 +215,7 @@ export class FaceCheckService {
       const fc = await this.estimateFaceCountFromDataUrl(dataUrl);
       const violations: string[] = [];
       if (fc === 0) violations.push('no_face_detected');
-      if (fc > 1) violations.push('multiple_faces_detected');
+      this.localMultiFaceStreak = 0;
       this.enqueueLocal({
         face_count: fc,
         detector: 'canvas_fallback',
@@ -254,7 +261,6 @@ export class FaceCheckService {
           }
           const ratio = skin / (w * h);
           if (ratio < 0.08) resolve(0);
-          else if (ratio > 0.35) resolve(2);
           else resolve(1);
         } catch {
           resolve(1);

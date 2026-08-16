@@ -11,6 +11,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 from proctoring.domain.models import RegisteredUser
+from proctoring.config import (
+    FACE_MIN_BOX_AREA_RATIO,
+    FACE_MIN_DETECTION_CONFIDENCE,
+    FACE_NMS_IOU,
+)
+from proctoring.services.face_detections import filter_face_detections
 
 try:
     from ultralytics import YOLO
@@ -68,7 +74,12 @@ def _clip_bbox(
 
 def extract_single_face_crop(face_detection: Any, frame_bgr: np.ndarray) -> np.ndarray:
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    detections = face_detection.process(frame_rgb).detections or []
+    detections = filter_face_detections(
+        face_detection.process(frame_rgb).detections or [],
+        min_confidence=FACE_MIN_DETECTION_CONFIDENCE,
+        min_area_ratio=FACE_MIN_BOX_AREA_RATIO,
+        nms_iou=FACE_NMS_IOU,
+    )
 
     if len(detections) == 0:
         raise ValueError("No face detected")
@@ -93,7 +104,12 @@ def extract_single_face_crop(face_detection: Any, frame_bgr: np.ndarray) -> np.n
 
 def get_single_face_area_ratio(face_detection: Any, frame_bgr: np.ndarray) -> float:
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    detections = face_detection.process(frame_rgb).detections or []
+    detections = filter_face_detections(
+        face_detection.process(frame_rgb).detections or [],
+        min_confidence=FACE_MIN_DETECTION_CONFIDENCE,
+        min_area_ratio=FACE_MIN_BOX_AREA_RATIO,
+        nms_iou=FACE_NMS_IOU,
+    )
     if len(detections) == 0:
         raise ValueError("No face detected")
     if len(detections) > 1:
@@ -287,7 +303,7 @@ class ElectronicsDetector:
         self._max_dim = max(160, int(max_dim))
         self._frame_counter = 0
         self._label_tokens = tuple(token.lower() for token in label_tokens)
-        self._last_detection: dict[str, Any] = {"detected": False, "labels": []}
+        self._last_detection: dict[str, Any] = {"detected": False, "labels": [], "fresh": False}
         self.enabled = YOLO is not None
         self._model = None
         if self.enabled and Path(model_path).is_file():
@@ -304,9 +320,9 @@ class ElectronicsDetector:
         self._frame_counter += 1
         should_infer = self._frame_counter == 1 or self._frame_counter % self._frame_skip == 0
         if not self.enabled or self._model is None:
-            return {"detected": False, "labels": []}
+            return {"detected": False, "labels": [], "fresh": False}
         if not should_infer:
-            return dict(self._last_detection)
+            return {**self._last_detection, "fresh": False}
 
         frame = self._prepare_frame(frame_bgr)
         try:
@@ -319,7 +335,7 @@ class ElectronicsDetector:
             )
         except Exception:
             logger.exception("ElectronicsDetector predict failed")
-            self._last_detection = {"detected": False, "labels": []}
+            self._last_detection = {"detected": False, "labels": [], "fresh": True}
             return dict(self._last_detection)
 
         labels: list[str] = []
@@ -329,7 +345,7 @@ class ElectronicsDetector:
                 label = str(names.get(int(class_id), class_id)) if isinstance(names, dict) else str(class_id)
                 if self._is_electronics_label(label) and label not in labels:
                     labels.append(label)
-        self._last_detection = {"detected": bool(labels), "labels": labels}
+        self._last_detection = {"detected": bool(labels), "labels": labels, "fresh": True}
         return dict(self._last_detection)
 
     def _is_electronics_label(self, label: str) -> bool:

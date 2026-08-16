@@ -5,6 +5,7 @@ import { isUuid } from '../../utils/validation.js';
 import { analyzeFrame, detectPhone, compareFaces } from '../../services/ai/aiClient.js';
 import { persistAnalyzerEvents, persistPhoneEvent } from '../../services/ai/monitoringPersistence.js';
 import { runUnifiedProctorTick } from '../../services/ai/unifiedProctorAnalyze.js';
+import { applyDegradationToTickOptions } from '../../services/infra/degradation.js';
 
 const router = Router({ mergeParams: true });
 
@@ -39,12 +40,20 @@ router.post(
       );
     }
     try {
-      const data = await runUnifiedProctorTick(req.sdkTenantId, sessionId, image, {
+      const tickOptions = await applyDegradationToTickOptions({
         persist: parseBool(req.query.persist),
         reference_image: req.body?.reference_image,
         identity_threshold: req.body?.identity_threshold,
         loadReference: req.body?.load_reference !== false,
+        run_phone: req.body?.run_phone !== false,
+        run_electronics: req.body?.run_electronics === true,
+        run_identity: req.body?.run_identity === true,
+        run_deep_gaze: req.body?.run_deep_gaze,
       });
+      if (tickOptions.skipServerAi) {
+        return res.json({ data: { skipped: true, reason: 'ai_degradation_level' } });
+      }
+      const data = await runUnifiedProctorTick(req.sdkTenantId, sessionId, image, tickOptions);
       res.json({ data });
     } catch (e) {
       const status = e.status || 503;

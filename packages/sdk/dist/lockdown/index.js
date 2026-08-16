@@ -52,13 +52,36 @@ var ScreenCaptureBlocker = class {
   }
 };
 
+// src/lockdown/WindowFocusMonitor.ts
+var WindowFocusMonitor = class {
+  constructor() {
+    this.blurHandler = null;
+    this.focusHandler = null;
+  }
+  start(onChange) {
+    this.blurHandler = () => onChange(false);
+    this.focusHandler = () => onChange(true);
+    window.addEventListener("blur", this.blurHandler);
+    window.addEventListener("focus", this.focusHandler);
+  }
+  stop() {
+    if (this.blurHandler) window.removeEventListener("blur", this.blurHandler);
+    if (this.focusHandler) window.removeEventListener("focus", this.focusHandler);
+    this.blurHandler = null;
+    this.focusHandler = null;
+  }
+};
+
 // src/lockdown/LockdownEnforcer.ts
 var LockdownEnforcer = class {
   constructor() {
     this.keyboard = new KeyboardInterceptor();
     this.visibility = new VisibilityMonitor();
+    this.windowFocus = new WindowFocusMonitor();
     this.capture = new ScreenCaptureBlocker();
     this.releaseCapture = null;
+    this.displayCheckTimer = null;
+    this.lastMultiDisplay = null;
     this.listeners = [];
     this.onViolation = null;
   }
@@ -73,6 +96,22 @@ var LockdownEnforcer = class {
     this.onViolation = onViolation ?? null;
     this.keyboard.start(() => this.fire("blocked_shortcut"));
     this.visibility.start((hidden) => this.fire(hidden ? "tab_hidden" : "tab_visible"));
+    this.windowFocus.start((focused) => this.fire(focused ? "window_focus" : "window_blur"));
+    const checkDisplays = () => {
+      let multipleDisplays = false;
+      try {
+        multipleDisplays = Boolean(
+          window.screen.isExtended
+        );
+      } catch {
+      }
+      if (multipleDisplays !== this.lastMultiDisplay) {
+        this.lastMultiDisplay = multipleDisplays;
+        this.fire(multipleDisplays ? "multiple_displays_detected" : "single_display_detected");
+      }
+    };
+    checkDisplays();
+    this.displayCheckTimer = setInterval(checkDisplays, 3e4);
     if (merged.blockContextMenu) {
       const h = (e) => {
         e.preventDefault();
@@ -105,14 +144,6 @@ var LockdownEnforcer = class {
         document.body.style.userSelect = original;
       });
     }
-    const blur = () => this.fire("window_blur");
-    const focus = () => this.fire("window_focus");
-    window.addEventListener("blur", blur);
-    window.addEventListener("focus", focus);
-    this.listeners.push(() => {
-      window.removeEventListener("blur", blur);
-      window.removeEventListener("focus", focus);
-    });
     const fsChange = () => {
       if (!document.fullscreenElement) this.fire("fullscreen_exit");
     };
@@ -135,8 +166,12 @@ var LockdownEnforcer = class {
   stop() {
     this.keyboard.stop();
     this.visibility.stop();
+    this.windowFocus.stop();
     this.releaseCapture?.();
     this.releaseCapture = null;
+    if (this.displayCheckTimer) clearInterval(this.displayCheckTimer);
+    this.displayCheckTimer = null;
+    this.lastMultiDisplay = null;
     while (this.listeners.length) this.listeners.pop()?.();
     this.onViolation = null;
   }
@@ -260,6 +295,7 @@ export {
   LockdownEnforcer,
   NetworkMonitor,
   ScreenCaptureBlocker,
-  VisibilityMonitor
+  VisibilityMonitor,
+  WindowFocusMonitor
 };
 //# sourceMappingURL=index.js.map

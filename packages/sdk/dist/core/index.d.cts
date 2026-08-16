@@ -1,4 +1,4 @@
-export { P as ProctorShieldClient } from '../ProctorShieldClient-DAMa3Xag.cjs';
+export { P as ProctorShieldClient } from '../ProctorShieldClient-B8list-d.cjs';
 
 declare class ApiKeyValidator {
     static looksLikeKey(key: string): boolean;

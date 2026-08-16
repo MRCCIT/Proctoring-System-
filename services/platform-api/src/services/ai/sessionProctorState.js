@@ -9,6 +9,8 @@ export function getSessionProctorState(sessionId) {
       phoneActive: false,
       electronicsStreak: 0,
       electronicsActive: false,
+      multipleFaceStreak: 0,
+      multipleFaceActive: false,
       identityMismatchStreak: 0,
       lastTickAt: 0,
       tickCount: 0,

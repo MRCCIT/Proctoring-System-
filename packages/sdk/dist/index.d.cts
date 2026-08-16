@@ -1,11 +1,11 @@
 export { ApiKeyValidator, FeatureFlagResolver, SessionTokenManager, TenantConfigLoader } from './core/index.cjs';
-export { P as ProctorShieldClient } from './ProctorShieldClient-DAMa3Xag.cjs';
+export { P as ProctorShieldClient } from './ProctorShieldClient-B8list-d.cjs';
 export { ExamWindow, ExamWindowBranding, ExamWindowProps, FloatingCameraWindow, FloatingCameraWindowProps, IdentityVerification, PermissionGate, ProctorChatPanel, ProctoringIndicator, ProctoringTimer, SystemCheckResult, SystemCheckRunner, ViolationAlert, useProctoringSession, useSystemCheck } from './exam-window/index.cjs';
 export { AdminDashboard, LiveMonitoring, ProctorLiveView, ProctorLiveViewProps } from './admin-panel/index.cjs';
-export { ExternalAppDetector, KeyboardInterceptor, KeystrokeAnalyzer, KeystrokeAnomaly, LockdownEnforcer, LockdownOptions, NetworkMonitor, NetworkSnapshot, ScreenCaptureBlocker, ViolationReason, VisibilityMonitor } from './lockdown/index.cjs';
+export { ExternalAppDetector, KeyboardInterceptor, KeystrokeAnalyzer, KeystrokeAnomaly, LockdownEnforcer, LockdownOptions, NetworkMonitor, NetworkSnapshot, ScreenCaptureBlocker, ViolationReason, VisibilityMonitor, WindowFocusMonitor } from './lockdown/index.cjs';
 export { ChunkedRecorder, ChunkedRecorderOptions, MediaRecorderWrapper, RecordingTrack, TURNResolver, WebRTCManager, buildChunkSignaler, captureVideoFrame } from './media/index.cjs';
 export { A as AcquiredStreams, P as PermissionKind, a as PermissionManager, b as PermissionState, c as PermissionStatus } from './PermissionManager--3wybVk2.cjs';
-export { AudioAnalyzer, CloudInference, FACE_CHECK_WORKER_SOURCE, FaceCheckResult, FaceCheckService, FaceCheckServiceOptions, FaceDetector, GazeEstimator, LocalInference, ObjectDetector, createFaceCheckWorker } from './ai-client/index.cjs';
+export { AiSidecarThrottle, AiSidecarThrottleOptions, AudioAnalyzer, CloudInference, FACE_CHECK_WORKER_SOURCE, FaceCheckResult, FaceCheckService, FaceCheckServiceOptions, FaceDetector, GazeEstimator, IdentityCheckResult, IdentityCheckService, IdentityCheckServiceOptions, LocalInference, ObjectDetector, ServerAiAnalysis, ServerAiPhoneResult, createFaceCheckWorker } from './ai-client/index.cjs';
 export { EventEmitter, SdkEventType, SdkViolationEvent, WebhookDispatcher } from './events/index.cjs';
 export { C as ChatMessage, P as ProctorChatClient, a as ProctorChatClientOptions } from './ProctorChatClient-BaqzF393.cjs';
 import 'react/jsx-runtime';

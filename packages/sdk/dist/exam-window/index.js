@@ -322,6 +322,9 @@ var ProctorShieldClient = class {
   postSnapshot(sessionId, body) {
     return this.request("POST", `/v1/sdk/sessions/${sessionId}/snapshots`, body);
   }
+  getIdentityReference(sessionId) {
+    return this.request("GET", `/v1/sdk/sessions/${sessionId}/identity-reference`);
+  }
   postCandidateChat(sessionId, message) {
     return this.request("POST", `/v1/sdk/sessions/${sessionId}/chat`, { message });
   }
@@ -333,6 +336,14 @@ var ProctorShieldClient = class {
   }
   getTurnCredentials() {
     return this.request("GET", "/v1/sdk/turn-credentials");
+  }
+  /** Unified ~1 Hz proctor tick: face, gaze, phone streak, identity (Python microservices). */
+  monitorTickAi(sessionId, imageDataUrl, persist = false, body = {}) {
+    return this.request(
+      "POST",
+      `/v1/sdk/sessions/${sessionId}/ai/monitor-tick${persist ? "?persist=1" : ""}`,
+      { image: imageDataUrl, ...body }
+    );
   }
   analyzeFrameAi(sessionId, imageDataUrl, persist = false) {
     return this.request("POST", `/v1/sdk/sessions/${sessionId}/ai/analyze-frame${persist ? "?persist=1" : ""}`, {
@@ -450,7 +461,7 @@ var PermissionManager = class {
 };
 
 // src/media/ChunkedRecorder.ts
-var DEFAULT_MIMES = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
+var DEFAULT_MIMES = ["video/webm;codecs=vp8,opus", "video/webm", "video/webm;codecs=vp9,opus", "video/mp4"];
 function pickMime(list) {
   for (const m of list) {
     if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported?.(m)) return m;
@@ -463,23 +474,23 @@ var ChunkedRecorder = class {
     this.recorder = null;
     this.sequence = 0;
     this.currentChunkStart = 0;
-    this.buffer = [];
+    this.mimeType = "video/webm";
+    this.stopResolve = null;
   }
   start(stream) {
     if (this.recorder) return;
     const chunkMs = this.opts.chunkMs ?? 1e4;
     const mime = pickMime(this.opts.mimeTypes ?? DEFAULT_MIMES);
+    this.mimeType = mime || "video/webm";
     this.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
     this.currentChunkStart = Date.now();
     this.recorder.ondataavailable = async (e) => {
       if (!e.data.size) return;
-      this.buffer.push(e.data);
       const endedAt = Date.now();
-      const blob = new Blob(this.buffer, { type: this.buffer[0].type });
+      const blob = new Blob([e.data], { type: e.data.type || this.mimeType });
       const sequence = this.sequence++;
       const startedAt = new Date(this.currentChunkStart).toISOString();
       this.currentChunkStart = endedAt;
-      this.buffer = [];
       try {
         await this.opts.onChunk?.({
           blob,
@@ -491,17 +502,54 @@ var ChunkedRecorder = class {
       } catch {
       }
     };
+    this.recorder.onstop = () => {
+      this.recorder = null;
+      const done = this.stopResolve;
+      this.stopResolve = null;
+      done?.();
+    };
     this.recorder.start(chunkMs);
   }
+  /** Flush the final timeslice and wait for upload before session teardown. */
   stop() {
-    try {
-      this.recorder?.stop();
-    } catch {
+    const rec = this.recorder;
+    if (!rec || rec.state === "inactive") {
+      this.recorder = null;
+      return Promise.resolve();
     }
-    this.recorder = null;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.stopResolve = null;
+        resolve();
+      }, 8e3);
+      this.stopResolve = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      try {
+        if (rec.state === "recording") rec.requestData();
+        rec.stop();
+      } catch {
+        clearTimeout(timeout);
+        this.recorder = null;
+        this.stopResolve = null;
+        resolve();
+      }
+    });
   }
 };
-function buildChunkSignaler(client, sessionId) {
+async function blobToBase64(blob) {
+  const buf = await blob.arrayBuffer();
+  let binary = "";
+  const bytes = new Uint8Array(buf);
+  const chunk = 32768;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
+  return typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
+}
+function buildChunkSignaler(client, sessionId, opts = {}) {
+  const maxBytes = opts.maxBytes ?? 12 * 1024 * 1024;
   return async ({
     blob,
     sequence,
@@ -509,6 +557,8 @@ function buildChunkSignaler(client, sessionId) {
     startedAt,
     endedAt
   }) => {
+    const sendBinary = !opts.metadataOnly && blob.size > 0 && blob.size <= maxBytes;
+    const payload_base64 = sendBinary ? await blobToBase64(blob) : void 0;
     await client.postRecordingChunk(sessionId, {
       track,
       sequence,
@@ -516,10 +566,322 @@ function buildChunkSignaler(client, sessionId) {
       duration_ms: Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime()),
       started_at: startedAt,
       ended_at: endedAt,
-      metadata: { mime: blob.type }
+      mime_type: blob.type || "video/webm",
+      metadata: { mime: blob.type, persisted: sendBinary },
+      payload_base64
     });
   };
 }
+
+// src/media/captureFrame.ts
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+function resolveMediaStream(stream, video) {
+  if (stream?.getVideoTracks().some((t) => t.readyState === "live")) return stream;
+  if (video?.srcObject instanceof MediaStream) {
+    const s = video.srcObject;
+    if (s.getVideoTracks().some((t) => t.readyState === "live")) return s;
+  }
+  return stream || (video?.srcObject instanceof MediaStream ? video.srcObject : null);
+}
+function waitForVideoReady(video, timeoutMs = 6e3) {
+  if (video.videoWidth > 0 && video.videoHeight > 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      video.removeEventListener("loadeddata", onReady);
+      video.removeEventListener("loadedmetadata", onReady);
+      video.removeEventListener("playing", onReady);
+      resolve(ok);
+    };
+    const onReady = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) finish(true);
+    };
+    video.addEventListener("loadeddata", onReady);
+    video.addEventListener("loadedmetadata", onReady);
+    video.addEventListener("playing", onReady);
+    void video.play().catch(() => {
+    });
+    window.setTimeout(() => finish(video.videoWidth > 0 && video.videoHeight > 0), timeoutMs);
+  });
+}
+async function bindStreamToVideo(stream, video) {
+  if (video.srcObject !== stream) {
+    video.srcObject = stream;
+  }
+  video.muted = true;
+  video.playsInline = true;
+  await video.play().catch(() => {
+  });
+  return waitForVideoReady(video);
+}
+function drawVideoToJpeg(video, quality = 0.82, maxWidth = 960) {
+  try {
+    if (!video.videoWidth || !video.videoHeight) return null;
+    const targetW = Math.min(maxWidth, video.videoWidth);
+    const scale = targetW / video.videoWidth;
+    const targetH = Math.round(video.videoHeight * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, targetW, targetH);
+    return canvas.toDataURL("image/jpeg", quality);
+  } catch {
+    return null;
+  }
+}
+async function captureViaImageCapture(track) {
+  const ImageCaptureCtor = window.ImageCapture;
+  if (!ImageCaptureCtor) return null;
+  try {
+    const blob = await new ImageCaptureCtor(track).takePhoto();
+    return blobToDataUrl(blob);
+  } catch {
+    return null;
+  }
+}
+async function captureViaTempVideo(stream, timeoutMs = 6e3) {
+  const v = document.createElement("video");
+  v.muted = true;
+  v.playsInline = true;
+  v.srcObject = stream;
+  const ready = await waitForVideoReady(v, timeoutMs);
+  if (!ready) {
+    v.srcObject = null;
+    return null;
+  }
+  const url = drawVideoToJpeg(v);
+  v.srcObject = null;
+  return url;
+}
+async function captureFrameForAi(stream, existingVideo) {
+  const raw = await captureFrameFromStream(stream, existingVideo, { maxWidth: 480, quality: 0.72 });
+  if (!raw) return null;
+  return downscaleDataUrl(raw, 360, 0.62);
+}
+async function captureFrameFromStream(stream, existingVideo, opts = {}) {
+  const maxWidth = opts.maxWidth ?? 960;
+  const quality = opts.quality ?? 0.82;
+  const resolved = resolveMediaStream(stream, existingVideo);
+  if (existingVideo?.videoWidth && existingVideo.videoHeight) {
+    const direct = drawVideoToJpeg(existingVideo, quality, maxWidth);
+    if (direct) return direct;
+  }
+  if (resolved) {
+    const track = resolved.getVideoTracks().find((t) => t.readyState === "live");
+    if (track) {
+      const fromCapture = await captureViaImageCapture(track);
+      if (fromCapture) {
+        if (maxWidth < 960) return downscaleDataUrl(fromCapture, maxWidth, quality);
+        return fromCapture;
+      }
+    }
+    if (existingVideo) {
+      if (existingVideo.srcObject !== resolved) {
+        existingVideo.srcObject = resolved;
+        await existingVideo.play().catch(() => {
+        });
+      }
+      const ready = await waitForVideoReady(existingVideo);
+      if (ready) {
+        const fromBound = drawVideoToJpeg(existingVideo, quality, maxWidth);
+        if (fromBound) return fromBound;
+      }
+    }
+    const fromTemp = await captureViaTempVideo(resolved);
+    if (fromTemp && maxWidth < 960) {
+      return downscaleDataUrl(fromTemp, maxWidth, quality);
+    }
+    return fromTemp;
+  }
+  if (existingVideo) {
+    const ready = await waitForVideoReady(existingVideo);
+    if (ready) return drawVideoToJpeg(existingVideo, quality, maxWidth);
+  }
+  return null;
+}
+function downscaleDataUrl(dataUrl, maxWidth, quality) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = Math.min(maxWidth, img.width);
+        const h = Math.round(img.height / img.width * w) || 1;
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+async function dataUrlToImageBitmap(dataUrl) {
+  try {
+    if (typeof createImageBitmap === "function") {
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      return await createImageBitmap(blob);
+    }
+  } catch {
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(null);
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        void createImageBitmap(canvas).then(resolve).catch(() => resolve(null));
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+// src/media/TURNResolver.ts
+var TURNResolver = class {
+  constructor(client) {
+    this.client = client;
+  }
+  async resolve() {
+    const res = await this.client.getTurnCredentials();
+    return res.data;
+  }
+};
+
+// src/media/LiveVideoSignaling.ts
+var LiveVideoSignaling = class _LiveVideoSignaling {
+  constructor(role, chat, getLocalStream, onRemoteStream, iceServers) {
+    this.role = role;
+    this.chat = chat;
+    this.getLocalStream = getLocalStream;
+    this.onRemoteStream = onRemoteStream;
+    this.iceServers = iceServers;
+    this.pc = null;
+    this.polite = role === "proctor";
+  }
+  static async create(client, opts) {
+    let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+    try {
+      const turn = await new TURNResolver(client).resolve();
+      if (turn?.ice_servers?.length) iceServers = turn.ice_servers;
+    } catch {
+    }
+    return new _LiveVideoSignaling(opts.role, opts.chat, opts.getLocalStream, opts.onRemoteStream, iceServers);
+  }
+  start() {
+    this.offChat = this.chat.on((msg) => void this.onWsMessage(msg));
+    if (this.role === "proctor") {
+      this.chat.send({ op: "live_watch" });
+    }
+  }
+  stop() {
+    this.offChat?.();
+    this.offChat = void 0;
+    try {
+      this.pc?.close();
+    } catch {
+    }
+    this.pc = null;
+  }
+  sendSignal(signal) {
+    this.chat.send({ op: "live_signal", signal });
+  }
+  async ensurePc() {
+    if (this.pc) return this.pc;
+    this.pc = new RTCPeerConnection({ iceServers: this.iceServers });
+    this.pc.onicecandidate = (ev) => {
+      if (ev.candidate) this.sendSignal({ type: "ice", candidate: ev.candidate.toJSON() });
+    };
+    this.pc.ontrack = (ev) => {
+      const stream = ev.streams[0] ?? new MediaStream([ev.track]);
+      this.onRemoteStream?.(stream);
+    };
+    if (this.role === "candidate") {
+      const stream = this.getLocalStream();
+      stream?.getTracks().forEach((track) => {
+        try {
+          this.pc.addTrack(track, stream);
+        } catch {
+        }
+      });
+    }
+    return this.pc;
+  }
+  async publishOffer() {
+    const pc = await this.ensurePc();
+    const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: true });
+    await pc.setLocalDescription(offer);
+    this.sendSignal({ type: "offer", sdp: offer.sdp });
+  }
+  async onWsMessage(msg) {
+    const type = msg.type;
+    if (type === "live_watch_request" && this.role === "candidate") {
+      await this.publishOffer();
+      return;
+    }
+    if (type !== "live_signal") return;
+    const from = msg.from;
+    if (from === this.role) return;
+    const signal = msg.signal;
+    if (!signal) return;
+    const pc = await this.ensurePc();
+    if (signal.type === "offer" && this.role === "proctor") {
+      const offerCollision = pc.signalingState !== "stable";
+      const ignore = !this.polite && offerCollision;
+      if (ignore) return;
+      if (offerCollision) {
+        await pc.setLocalDescription({ type: "rollback" });
+      }
+      await pc.setRemoteDescription({ type: "offer", sdp: signal.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      this.sendSignal({ type: "answer", sdp: answer.sdp });
+      return;
+    }
+    if (signal.type === "answer" && this.role === "candidate") {
+      if (pc.signalingState === "have-local-offer") {
+        await pc.setRemoteDescription({ type: "answer", sdp: signal.sdp });
+      }
+      return;
+    }
+    if (signal.type === "ice" && signal.candidate) {
+      try {
+        await pc.addIceCandidate(signal.candidate);
+      } catch {
+      }
+    }
+  }
+};
 
 // src/ai-client/FaceCheckWorker.ts
 var FACE_CHECK_WORKER_SOURCE = `
@@ -559,10 +921,10 @@ self.heuristicFaceCount = function(bitmap) {
     }
     if (edges > 4) strongRows++;
   }
-  // Map "rows with edges" to a coarse face_count estimate.
+  // This fallback is presence-only. Edge density cannot reliably distinguish
+  // a close-up face from multiple people.
   if (strongRows < 4) return 0;
-  if (strongRows < 18) return 1;
-  return 2;
+  return 1;
 };
 
 self.analyzeBitmap = async function(bitmap) {
@@ -610,6 +972,74 @@ function createFaceCheckWorker() {
   }
 }
 
+// src/ai-client/AiSidecarThrottle.ts
+var AiSidecarThrottle = class {
+  constructor(opts = {}) {
+    this.nextAllowedAt = /* @__PURE__ */ new Map();
+    this.failures = 0;
+    this.openedAt = 0;
+    this.minIntervalMs = opts.minIntervalMs ?? 3e4;
+    this.failureThreshold = opts.failureThreshold ?? 3;
+    this.cooldownMs = opts.cooldownMs ?? 6e4;
+  }
+  /** Returns true if a call on `channel` may proceed now. */
+  allow(channel) {
+    const now = Date.now();
+    if (this.openedAt && now - this.openedAt < this.cooldownMs) return false;
+    if (this.openedAt && now - this.openedAt >= this.cooldownMs) {
+      this.openedAt = 0;
+      this.failures = 0;
+    }
+    const next = this.nextAllowedAt.get(channel) ?? 0;
+    return now >= next;
+  }
+  /** Records that a call has been issued so we don't double-fire. */
+  reserve(channel) {
+    this.nextAllowedAt.set(channel, Date.now() + this.minIntervalMs);
+  }
+  recordSuccess() {
+    this.failures = 0;
+    this.openedAt = 0;
+  }
+  recordFailure() {
+    this.failures += 1;
+    if (this.failures >= this.failureThreshold) this.openedAt = Date.now();
+  }
+  get state() {
+    const now = Date.now();
+    const open = Boolean(this.openedAt && now - this.openedAt < this.cooldownMs);
+    return {
+      open,
+      failures: this.failures,
+      cooldownRemainingMs: open ? this.cooldownMs - (now - this.openedAt) : 0
+    };
+  }
+};
+
+// src/ai-client/identityMatch.ts
+var DEFAULT_IDENTITY_MIN_SIMILARITY = 62;
+function normalizeMinSimilarity(threshold) {
+  if (threshold > 1 && threshold <= 100) return threshold;
+  if (threshold > 0 && threshold <= 1) return threshold * 100;
+  return DEFAULT_IDENTITY_MIN_SIMILARITY;
+}
+function similarityPercent(data) {
+  if (!data) return null;
+  const raw = data.similarity ?? data.similarity_score;
+  const sim = Number(raw);
+  if (!Number.isFinite(sim)) return null;
+  return sim <= 1 ? sim * 100 : sim;
+}
+function isIdentityVerified(data, minSimilarity = DEFAULT_IDENTITY_MIN_SIMILARITY) {
+  if (!data) return false;
+  const min = normalizeMinSimilarity(minSimilarity);
+  const pct = similarityPercent(data);
+  if (pct == null) return false;
+  if (pct < min) return false;
+  if (data.verified === false) return false;
+  return true;
+}
+
 // src/ai-client/FaceCheckService.ts
 var FaceCheckService = class {
   constructor(client, sessionId, opts = {}) {
@@ -618,80 +1048,233 @@ var FaceCheckService = class {
     this.worker = null;
     this.timer = null;
     this.flushTimer = null;
+    this.serverInterval = null;
+    this.serverTickInFlight = false;
+    this.serverTickSerial = 0;
+    this.serverCatchUp = false;
     this.queue = [];
     this.running = false;
     this.msgId = 0;
+    this.localCheckCount = 0;
+    this.localMultiFaceStreak = 0;
+    this.currentVideo = null;
     this.opts = {
       intervalMs: opts.intervalMs ?? 1e4,
       flushAt: opts.flushAt ?? 6,
       flushIntervalMs: opts.flushIntervalMs ?? 3e4,
       onResult: opts.onResult ?? (() => {
-      })
+      }),
+      getStream: opts.getStream ?? (() => null),
+      serverAi: opts.serverAi ?? false,
+      analyzeMinIntervalMs: opts.analyzeMinIntervalMs ?? 500,
+      phoneCheckMinIntervalMs: opts.phoneCheckMinIntervalMs ?? 1e3,
+      serverHeartbeatEvery: opts.serverHeartbeatEvery ?? 3,
+      onServerAnalysis: opts.onServerAnalysis ?? (() => {
+      }),
+      onServerPhoneCheck: opts.onServerPhoneCheck ?? (() => {
+      }),
+      onServerTick: opts.onServerTick ?? (() => {
+      }),
+      onServerError: opts.onServerError ?? (() => {
+      }),
+      persistServerAi: opts.persistServerAi ?? true,
+      referenceImage: opts.referenceImage ?? null,
+      identityThreshold: opts.identityThreshold ?? DEFAULT_IDENTITY_MIN_SIMILARITY
     };
+    this.monitorThrottle = new AiSidecarThrottle({
+      minIntervalMs: 0,
+      failureThreshold: 12,
+      cooldownMs: 1e4
+    });
   }
   start(video) {
     if (this.running) return;
     this.running = true;
+    this.currentVideo = video;
     this.worker = createFaceCheckWorker();
     this.timer = setInterval(() => void this.captureOnce(video), this.opts.intervalMs);
     this.flushTimer = setInterval(() => void this.flush(), this.opts.flushIntervalMs);
+    if (this.opts.serverAi) {
+      void this.runServerAi("heartbeat");
+      this.serverInterval = setInterval(
+        () => void this.runServerAi("heartbeat"),
+        this.opts.analyzeMinIntervalMs
+      );
+    }
   }
   stop() {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     if (this.flushTimer) clearInterval(this.flushTimer);
+    if (this.serverInterval) clearInterval(this.serverInterval);
     this.timer = null;
     this.flushTimer = null;
+    this.serverInterval = null;
     try {
       this.worker?.terminate();
     } catch {
     }
     this.worker = null;
+    this.currentVideo = null;
     void this.flush();
   }
+  get aiState() {
+    return { monitor: this.monitorThrottle.state };
+  }
+  setReferenceImage(dataUrl) {
+    this.opts.referenceImage = dataUrl;
+  }
+  async captureFrame() {
+    const stream = this.opts.getStream();
+    const video = this.currentVideo;
+    if (!stream && !video) return null;
+    return captureFrameForAi(stream, video);
+  }
   async captureOnce(video) {
-    if (!this.worker || !video.videoWidth) return;
+    if (!this.worker) return;
     try {
-      const bitmap = await this.captureBitmap(video);
-      if (!bitmap) return;
-      const id = ++this.msgId;
-      const promise = new Promise((resolve) => {
-        const handler = (e) => {
-          if (e.data?.id !== id) return;
-          this.worker?.removeEventListener("message", handler);
-          resolve(e.data.result || null);
-        };
-        this.worker?.addEventListener("message", handler);
-        setTimeout(() => {
-          this.worker?.removeEventListener("message", handler);
-          resolve(null);
-        }, 4e3);
-      });
-      this.worker.postMessage({ id, bitmap }, [bitmap]);
-      const res = await promise;
-      if (!res) return;
+      const dataUrl = await captureFrameFromStream(this.opts.getStream(), video, { maxWidth: 320, quality: 0.7 });
+      if (!dataUrl) return;
+      const bitmap = await dataUrlToImageBitmap(dataUrl);
+      if (bitmap) {
+        const id = ++this.msgId;
+        const promise = new Promise((resolve) => {
+          const handler = (e) => {
+            if (e.data?.id !== id) return;
+            this.worker?.removeEventListener("message", handler);
+            resolve(e.data.result || null);
+          };
+          this.worker?.addEventListener("message", handler);
+          setTimeout(() => {
+            this.worker?.removeEventListener("message", handler);
+            resolve(null);
+          }, 2500);
+        });
+        this.worker.postMessage({ id, bitmap }, [bitmap]);
+        const res = await promise;
+        if (res) {
+          const violations2 = [];
+          if (res.face_count === 0) violations2.push("no_face_detected");
+          const trustedMultiFace = res.detector === "native_FaceDetector" && res.face_count > 1;
+          this.localMultiFaceStreak = trustedMultiFace ? this.localMultiFaceStreak + 1 : 0;
+          if (!this.opts.serverAi && this.localMultiFaceStreak >= 2) {
+            violations2.push("multiple_faces_detected");
+          }
+          const result = { ...res, violations: violations2 };
+          this.enqueueLocal(result);
+          if (this.opts.serverAi && violations2.includes("no_face_detected")) {
+            void this.runServerAi("suspicious");
+          }
+          return;
+        }
+      }
+      const fc = await this.estimateFaceCountFromDataUrl(dataUrl);
       const violations = [];
-      if (res.face_count === 0) violations.push("no_face_detected");
-      if (res.face_count > 1) violations.push("multiple_faces_detected");
-      const result = { ...res, violations };
-      this.queue.push(result);
-      this.opts.onResult(result);
-      if (this.queue.length >= this.opts.flushAt) void this.flush();
+      if (fc === 0) violations.push("no_face_detected");
+      this.localMultiFaceStreak = 0;
+      this.enqueueLocal({
+        face_count: fc,
+        detector: "canvas_fallback",
+        ts: Date.now(),
+        violations
+      });
+      if (this.opts.serverAi && violations.length) void this.runServerAi("suspicious");
     } catch {
     }
   }
-  async captureBitmap(video) {
-    try {
-      if (typeof window.createImageBitmap === "function") {
-        return await createImageBitmap(video, {
-          resizeWidth: 320,
-          resizeHeight: 240,
-          resizeQuality: "low"
-        });
-      }
-    } catch {
+  enqueueLocal(result) {
+    this.queue.push(result);
+    this.opts.onResult(result);
+    this.localCheckCount += 1;
+    if (this.queue.length >= this.opts.flushAt) void this.flush();
+  }
+  async estimateFaceCountFromDataUrl(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const w = 160;
+          const h = Math.round(img.height / img.width * w) || 120;
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(1);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const data = ctx.getImageData(0, 0, w, h).data;
+          let skin = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            if (r > 60 && g > 40 && b > 20 && r > g && r > b && Math.abs(r - g) > 15) skin += 1;
+          }
+          const ratio = skin / (w * h);
+          if (ratio < 0.08) resolve(0);
+          else resolve(1);
+        } catch {
+          resolve(1);
+        }
+      };
+      img.onerror = () => resolve(1);
+      img.src = dataUrl;
+    });
+  }
+  async runServerAi(_reason) {
+    if (!this.opts.serverAi || !this.running) return;
+    if (this.serverTickInFlight) {
+      this.serverCatchUp = true;
+      return;
     }
-    return null;
+    if (!this.monitorThrottle.allow("monitor")) {
+      const st = this.monitorThrottle.state;
+      if (st.open) {
+        this.opts.onServerError(`AI paused (circuit open, retry in ${Math.ceil(st.cooldownRemainingMs / 1e3)}s)`);
+      }
+      return;
+    }
+    const tickId = ++this.serverTickSerial;
+    this.serverTickInFlight = true;
+    try {
+      const img = await this.captureFrame();
+      if (!img || tickId !== this.serverTickSerial) return;
+      const body = { load_reference: true };
+      if (this.opts.referenceImage) {
+        body.reference_image = this.opts.referenceImage;
+        body.load_reference = false;
+      }
+      body.identity_threshold = normalizeMinSimilarity(this.opts.identityThreshold);
+      const r = await this.client.monitorTickAi(this.sessionId, img, this.opts.persistServerAi, body);
+      if (tickId !== this.serverTickSerial) return;
+      this.monitorThrottle.recordSuccess();
+      const payload = r?.data;
+      const analysis = payload && typeof payload === "object" && "analysis" in payload ? payload.analysis : payload;
+      if (!analysis || typeof analysis !== "object" || !("face_count" in analysis)) {
+        this.opts.onServerError("AI returned an empty analysis payload");
+        return;
+      }
+      this.opts.onServerAnalysis(analysis);
+      this.opts.onServerTick({
+        ...analysis,
+        ok: true
+      });
+      this.opts.onServerPhoneCheck({
+        phone_detected: Boolean(analysis.phone_detected),
+        yolo_enabled: Boolean(analysis.phone_yolo_enabled)
+      });
+    } catch (e) {
+      this.monitorThrottle.recordFailure();
+      this.opts.onServerError(e.message || "AI monitor-tick failed");
+    } finally {
+      this.serverTickInFlight = false;
+      if (this.serverCatchUp && this.running) {
+        this.serverCatchUp = false;
+        void this.runServerAi("heartbeat");
+      }
+    }
   }
   async flush() {
     if (!this.queue.length) return;
@@ -699,17 +1282,119 @@ var FaceCheckService = class {
       face_count: r.face_count,
       detector: r.detector,
       occurred_at: new Date(r.ts).toISOString(),
-      violations: r.violations
+      violations: r.violations,
+      source: "local_worker"
     }));
     try {
       await this.client.postFaceChecks(this.sessionId, items);
     } catch {
-      this.queue.unshift(...items.map((it) => ({
-        face_count: Number(it.face_count) || 0,
-        detector: String(it.detector || "unknown"),
-        ts: new Date(it.occurred_at).getTime(),
-        violations: it.violations || []
-      })));
+      this.queue.unshift(
+        ...items.map((it) => ({
+          face_count: Number(it.face_count) || 0,
+          detector: String(it.detector || "unknown"),
+          ts: new Date(it.occurred_at).getTime(),
+          violations: it.violations || []
+        }))
+      );
+    }
+  }
+};
+
+// src/ai-client/IdentityCheckService.ts
+var IdentityCheckService = class {
+  constructor(client, sessionId, referenceDataUrl, opts = {}) {
+    this.client = client;
+    this.sessionId = sessionId;
+    this.referenceDataUrl = referenceDataUrl;
+    this.timer = null;
+    this.throttle = new AiSidecarThrottle({ minIntervalMs: 9e3, failureThreshold: 4, cooldownMs: 3e4 });
+    this.currentVideo = null;
+    this.consecutiveFailures = 0;
+    this.lastVerified = true;
+    this.busy = false;
+    this.opts = {
+      intervalMs: opts.intervalMs ?? 1e4,
+      threshold: opts.threshold ?? DEFAULT_IDENTITY_MIN_SIMILARITY,
+      failuresBeforeViolation: opts.failuresBeforeViolation ?? 2,
+      persist: opts.persist ?? true,
+      getStream: opts.getStream ?? (() => null),
+      onResult: opts.onResult ?? (() => {
+      }),
+      onMismatch: opts.onMismatch ?? (() => {
+      }),
+      onRestored: opts.onRestored ?? (() => {
+      })
+    };
+  }
+  start(video) {
+    if (this.timer) return;
+    this.currentVideo = video;
+    this.timer = setInterval(() => void this.runOnce(), this.opts.intervalMs);
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.currentVideo = null;
+  }
+  /** Force a one-shot check, e.g. immediately after the identity step. */
+  async runOnce() {
+    if (this.busy) return null;
+    if (!this.currentVideo) return null;
+    if (!this.throttle.allow("identity")) return null;
+    const img = await captureFrameFromStream(this.opts.getStream(), this.currentVideo);
+    if (!img) return null;
+    this.busy = true;
+    this.throttle.reserve("identity");
+    try {
+      const resp = await this.client.faceCompareAi(this.sessionId, {
+        reference_image: this.referenceDataUrl,
+        live_image: img,
+        identity_threshold: this.opts.threshold
+      });
+      this.throttle.recordSuccess();
+      const sim = Number(resp?.data?.similarity ?? 0);
+      const min = normalizeMinSimilarity(this.opts.threshold);
+      const verified = isIdentityVerified(resp?.data, min);
+      const result = {
+        ts: Date.now(),
+        similarity: sim,
+        verified,
+        detector: String(resp?.data?.detector || "arcface"),
+        source: "arcface"
+      };
+      this.opts.onResult(result);
+      if (this.opts.persist) {
+        void this.client.postFaceChecks(this.sessionId, [
+          {
+            face_count: 1,
+            match_score: result.similarity,
+            detector: result.detector,
+            source: "identity_check",
+            violations: verified ? [] : ["identity_mismatch"],
+            occurred_at: new Date(result.ts).toISOString()
+          }
+        ]).catch(() => {
+        });
+      }
+      if (!verified) {
+        this.consecutiveFailures += 1;
+        if (this.consecutiveFailures >= this.opts.failuresBeforeViolation && this.lastVerified) {
+          this.lastVerified = false;
+          this.opts.onMismatch(result);
+        }
+      } else {
+        this.consecutiveFailures = 0;
+        if (!this.lastVerified) {
+          this.lastVerified = true;
+          this.opts.onRestored(result);
+        }
+      }
+      return result;
+    } catch {
+      this.throttle.recordFailure();
+      return null;
+    } finally {
+      this.busy = false;
     }
   }
 };
@@ -757,7 +1442,7 @@ var AudioAnalyzer = class {
     const voiceRatio = voiceEnergy / ((voiceHigh - voiceLow) * 255 || 1);
     const reading = {
       level: rms,
-      voice_detected: voiceRatio > 0.12,
+      voice_detected: voiceRatio > 0.22 && rms > 0.06,
       noise: Math.min(1, rms * 1.5),
       ts: Date.now()
     };
@@ -836,13 +1521,36 @@ var ScreenCaptureBlocker = class {
   }
 };
 
+// src/lockdown/WindowFocusMonitor.ts
+var WindowFocusMonitor = class {
+  constructor() {
+    this.blurHandler = null;
+    this.focusHandler = null;
+  }
+  start(onChange) {
+    this.blurHandler = () => onChange(false);
+    this.focusHandler = () => onChange(true);
+    window.addEventListener("blur", this.blurHandler);
+    window.addEventListener("focus", this.focusHandler);
+  }
+  stop() {
+    if (this.blurHandler) window.removeEventListener("blur", this.blurHandler);
+    if (this.focusHandler) window.removeEventListener("focus", this.focusHandler);
+    this.blurHandler = null;
+    this.focusHandler = null;
+  }
+};
+
 // src/lockdown/LockdownEnforcer.ts
 var LockdownEnforcer = class {
   constructor() {
     this.keyboard = new KeyboardInterceptor();
     this.visibility = new VisibilityMonitor();
+    this.windowFocus = new WindowFocusMonitor();
     this.capture = new ScreenCaptureBlocker();
     this.releaseCapture = null;
+    this.displayCheckTimer = null;
+    this.lastMultiDisplay = null;
     this.listeners = [];
     this.onViolation = null;
   }
@@ -857,6 +1565,22 @@ var LockdownEnforcer = class {
     this.onViolation = onViolation ?? null;
     this.keyboard.start(() => this.fire("blocked_shortcut"));
     this.visibility.start((hidden) => this.fire(hidden ? "tab_hidden" : "tab_visible"));
+    this.windowFocus.start((focused) => this.fire(focused ? "window_focus" : "window_blur"));
+    const checkDisplays = () => {
+      let multipleDisplays = false;
+      try {
+        multipleDisplays = Boolean(
+          window.screen.isExtended
+        );
+      } catch {
+      }
+      if (multipleDisplays !== this.lastMultiDisplay) {
+        this.lastMultiDisplay = multipleDisplays;
+        this.fire(multipleDisplays ? "multiple_displays_detected" : "single_display_detected");
+      }
+    };
+    checkDisplays();
+    this.displayCheckTimer = setInterval(checkDisplays, 3e4);
     if (merged.blockContextMenu) {
       const h = (e) => {
         e.preventDefault();
@@ -889,14 +1613,6 @@ var LockdownEnforcer = class {
         document.body.style.userSelect = original;
       });
     }
-    const blur = () => this.fire("window_blur");
-    const focus = () => this.fire("window_focus");
-    window.addEventListener("blur", blur);
-    window.addEventListener("focus", focus);
-    this.listeners.push(() => {
-      window.removeEventListener("blur", blur);
-      window.removeEventListener("focus", focus);
-    });
     const fsChange = () => {
       if (!document.fullscreenElement) this.fire("fullscreen_exit");
     };
@@ -919,8 +1635,12 @@ var LockdownEnforcer = class {
   stop() {
     this.keyboard.stop();
     this.visibility.stop();
+    this.windowFocus.stop();
     this.releaseCapture?.();
     this.releaseCapture = null;
+    if (this.displayCheckTimer) clearInterval(this.displayCheckTimer);
+    this.displayCheckTimer = null;
+    this.lastMultiDisplay = null;
     while (this.listeners.length) this.listeners.pop()?.();
     this.onViolation = null;
   }
@@ -1162,7 +1882,22 @@ function PermissionGate(props) {
       off();
     };
   }, [manager]);
-  const ready = state.camera === "granted" && state.microphone === "granted" && (!requireScreen || state.screen === "granted");
+  useEffect(() => {
+    if (state.camera !== "granted" || state.microphone !== "granted") return;
+    if (manager.acquired.cameraAndMicStream?.getVideoTracks().some((t) => t.readyState === "live")) {
+      return;
+    }
+    void manager.requestCameraAndMic().catch((e) => {
+      setError(
+        `Could not open camera/microphone: ${e.message}. Click "Allow camera & microphone" or check site permissions.`
+      );
+    });
+  }, [state.camera, state.microphone, manager]);
+  const camMicLive = Boolean(
+    manager.acquired.cameraAndMicStream?.getVideoTracks().some((t) => t.readyState === "live")
+  );
+  const screenLive = !requireScreen || Boolean(manager.acquired.screenStream?.getVideoTracks().some((t) => t.readyState === "live"));
+  const ready = state.camera === "granted" && state.microphone === "granted" && (!requireScreen || state.screen === "granted") && camMicLive && screenLive;
   const askCamMic = async () => {
     setError(null);
     setBusy("cammic");
@@ -1185,10 +1920,19 @@ function PermissionGate(props) {
       setBusy(null);
     }
   };
-  const start = () => {
+  const start = async () => {
     if (!ready) return;
+    let stream = manager.acquired.cameraAndMicStream;
+    if (!stream?.getVideoTracks().length) {
+      try {
+        stream = await manager.requestCameraAndMic();
+      } catch (e) {
+        setError(`Camera/microphone blocked: ${e.message}`);
+        return;
+      }
+    }
     onAllReady({
-      camMicStream: manager.acquired.cameraAndMicStream,
+      camMicStream: stream,
       screenStream: manager.acquired.screenStream
     });
   };
@@ -1257,7 +2001,7 @@ function PermissionGate(props) {
       {
         type: "button",
         disabled: !ready,
-        onClick: start,
+        onClick: () => void start(),
         style: {
           marginTop: 12,
           background: ready ? brandPrimary : "#cbd5e1",
@@ -1268,7 +2012,7 @@ function PermissionGate(props) {
           fontSize: 14,
           cursor: ready ? "pointer" : "not-allowed"
         },
-        children: ready ? "Continue to identity check" : "Awaiting permissions\u2026"
+        children: ready ? "Continue to system check" : state.camera === "granted" && state.microphone === "granted" && !camMicLive ? "Starting camera\u2026" : "Awaiting permissions\u2026"
       }
     )
   ] });
@@ -1278,10 +2022,11 @@ function PermissionGate(props) {
 import { useEffect as useEffect2, useState as useState2 } from "react";
 import { jsx as jsx2, jsxs as jsxs2 } from "react/jsx-runtime";
 function SystemCheckRunner(props) {
-  const { camMicStream, probeUrl, brandPrimary = "#0f172a", onComplete } = props;
+  const { camMicStream, probeUrl, brandPrimary = "#0f172a", onStreamAcquired, onComplete } = props;
   const [steps, setSteps] = useState2([]);
   const [result, setResult] = useState2(null);
   useEffect2(() => {
+    let cancelled = false;
     const next = [
       { key: "webcam", label: "Webcam", status: "pending" },
       { key: "microphone", label: "Microphone", status: "pending" },
@@ -1292,9 +2037,27 @@ function SystemCheckRunner(props) {
     ];
     setSteps(next);
     void run(next);
+    return () => {
+      cancelled = true;
+    };
     async function run(s) {
-      const hasVideo = (camMicStream?.getVideoTracks().length ?? 0) > 0;
-      const hasAudio = (camMicStream?.getAudioTracks().length ?? 0) > 0;
+      let stream = camMicStream;
+      if (!stream?.getVideoTracks().some((t) => t.readyState === "live")) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+            audio: { echoCancellation: true, noiseSuppression: true }
+          });
+        } catch {
+          stream = camMicStream;
+        }
+      }
+      if (cancelled) return;
+      const hasVideo = (stream?.getVideoTracks().length ?? 0) > 0;
+      const hasAudio = (stream?.getAudioTracks().length ?? 0) > 0;
+      if (stream && hasVideo && stream !== camMicStream) {
+        onStreamAcquired?.(stream);
+      }
       s[0].status = hasVideo ? "ok" : "fail";
       s[1].status = hasAudio ? "ok" : "fail";
       const screenOk = window.screen.width >= 1024 && window.screen.height >= 600;
@@ -1337,7 +2100,7 @@ function SystemCheckRunner(props) {
       setSteps([...s]);
       setResult(r);
     }
-  }, [camMicStream, probeUrl]);
+  }, [camMicStream, probeUrl, onStreamAcquired]);
   const ready = result && result.webcam && result.microphone && result.browser_compatible;
   const COLOR = { ok: "#16a34a", warn: "#d97706", fail: "#b91c1c", pending: "#64748b" };
   return /* @__PURE__ */ jsxs2("section", { style: { maxWidth: 640 }, children: [
@@ -1388,33 +2151,77 @@ function SystemCheckRunner(props) {
 import { useEffect as useEffect3, useRef, useState as useState3 } from "react";
 import { Fragment, jsx as jsx3, jsxs as jsxs3 } from "react/jsx-runtime";
 function IdentityVerification(props) {
-  const { client, sessionId, cameraStream, brandPrimary = "#0f172a", onDone } = props;
+  const {
+    client,
+    sessionId,
+    cameraStream,
+    brandPrimary = "#0f172a",
+    referenceImage,
+    referenceUrl,
+    minSimilarity = DEFAULT_IDENTITY_MIN_SIMILARITY,
+    onDone
+  } = props;
   const videoRef = useRef(null);
   const [captured, setCaptured] = useState3(null);
   const [busy, setBusy] = useState3(false);
+  const [match, setMatch] = useState3(null);
   const [err, setErr] = useState3(null);
   useEffect3(() => {
     if (videoRef.current && cameraStream) {
-      videoRef.current.srcObject = cameraStream;
+      void bindStreamToVideo(cameraStream, videoRef.current);
     }
   }, [cameraStream]);
-  const capture = () => {
+  const capture = async () => {
     const v = videoRef.current;
-    if (!v?.videoWidth) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = v.videoWidth;
-    canvas.height = v.videoHeight;
-    canvas.getContext("2d")?.drawImage(v, 0, 0);
-    setCaptured(canvas.toDataURL("image/jpeg", 0.8));
+    if (!v) return;
+    const frame = await captureFrameFromStream(cameraStream, v);
+    if (!frame) {
+      setErr("Could not capture from camera. Allow camera access and try again.");
+      return;
+    }
+    setCaptured(frame);
+    setMatch(null);
     setErr(null);
   };
+  const hasReference = Boolean(referenceImage || referenceUrl);
+  const minPct = normalizeMinSimilarity(minSimilarity);
   const submit = async () => {
     if (!captured) return;
+    if (!hasReference) {
+      setErr(
+        'No enrolled reference photo found for this candidate (e.g. savej). Run db:seed with assets/savej-reference.png and use external ref "savej", or enroll a photo in tenant admin.'
+      );
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
       await client.submitIdentity(sessionId, { image_base64: captured });
-      onDone({ image_base64: captured });
+      let result;
+      try {
+        const body = referenceUrl ? { profile_url: referenceUrl, live_url: captured, identity_threshold: minPct } : { reference_image: referenceImage, live_image: captured, identity_threshold: minPct };
+        const resp = await client.faceCompareAi(sessionId, body);
+        const sim = Number(resp?.data?.similarity ?? 0);
+        const verified = isIdentityVerified(resp?.data, minPct);
+        result = {
+          similarity: sim,
+          verified,
+          detector: String(resp?.data?.detector || "arcface")
+        };
+        setMatch(result);
+        if (!verified) {
+          setErr(
+            `Identity check failed \u2014 similarity ${sim.toFixed(1)}% is below required ${minPct.toFixed(0)}%. Only the enrolled candidate may proceed. Retake with your face centered and well lit.`
+          );
+          return;
+        }
+      } catch (e) {
+        setErr(
+          `Identity verification could not run (${e.message}). Start the AI server: npm run dev:ai (port 5055), then retake your photo.`
+        );
+        return;
+      }
+      onDone({ image_base64: captured, match: result });
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -1423,7 +2230,10 @@ function IdentityVerification(props) {
   };
   return /* @__PURE__ */ jsxs3("section", { style: { maxWidth: 640 }, children: [
     /* @__PURE__ */ jsx3("h2", { style: { marginBottom: 4 }, children: "Identity verification" }),
-    /* @__PURE__ */ jsx3("p", { style: { color: "#475569", fontSize: 14, marginBottom: 12 }, children: "Center your face inside the frame, look straight at the camera, then click Capture." }),
+    /* @__PURE__ */ jsxs3("p", { style: { color: "#475569", fontSize: 14, marginBottom: 12 }, children: [
+      "Center your face inside the frame, look straight at the camera, then click Capture.",
+      hasReference && " Your photo will be matched against your registered ID using ArcFace."
+    ] }),
     /* @__PURE__ */ jsxs3("div", { style: { position: "relative", maxWidth: 480, marginBottom: 12 }, children: [
       /* @__PURE__ */ jsx3(
         "video",
@@ -1454,8 +2264,15 @@ function IdentityVerification(props) {
       "button",
       {
         type: "button",
-        onClick: capture,
-        style: { background: brandPrimary, color: "#fff", border: "none", padding: "8px 14px", borderRadius: 8, cursor: "pointer" },
+        onClick: () => void capture(),
+        style: {
+          background: brandPrimary,
+          color: "#fff",
+          border: "none",
+          padding: "8px 14px",
+          borderRadius: 8,
+          cursor: "pointer"
+        },
         children: "Capture photo"
       }
     ) : /* @__PURE__ */ jsxs3(Fragment, { children: [
@@ -1463,8 +2280,18 @@ function IdentityVerification(props) {
         "button",
         {
           type: "button",
-          onClick: () => setCaptured(null),
-          style: { background: "#64748b", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 8, cursor: "pointer" },
+          onClick: () => {
+            setCaptured(null);
+            setMatch(null);
+          },
+          style: {
+            background: "#64748b",
+            color: "#fff",
+            border: "none",
+            padding: "8px 14px",
+            borderRadius: 8,
+            cursor: "pointer"
+          },
           children: "Retake"
         }
       ),
@@ -1474,11 +2301,38 @@ function IdentityVerification(props) {
           type: "button",
           disabled: busy,
           onClick: () => void submit(),
-          style: { background: brandPrimary, color: "#fff", border: "none", padding: "8px 14px", borderRadius: 8, cursor: "pointer" },
-          children: busy ? "Submitting\u2026" : "Verify & start exam"
+          style: {
+            background: brandPrimary,
+            color: "#fff",
+            border: "none",
+            padding: "8px 14px",
+            borderRadius: 8,
+            cursor: "pointer"
+          },
+          children: busy ? "Verifying\u2026" : hasReference ? "Match & start exam" : "Verify & start exam"
         }
       )
     ] }) }),
+    match && /* @__PURE__ */ jsxs3(
+      "p",
+      {
+        style: {
+          color: match.verified ? "#15803d" : "#b45309",
+          fontSize: 13,
+          marginTop: 12
+        },
+        children: [
+          match.verified ? "Identity match" : "Identity weak match",
+          " \u2014",
+          " ",
+          "similarity ",
+          match.similarity.toFixed(2),
+          " via ",
+          match.detector,
+          "."
+        ]
+      }
+    ),
     err && /* @__PURE__ */ jsx3("p", { style: { color: "#b91c1c", fontSize: 13, marginTop: 12 }, children: err })
   ] });
 }
@@ -1634,7 +2488,7 @@ function FloatingCameraWindow(props) {
 // src/exam-window/components/ProctoringIndicator.tsx
 import { jsx as jsx5, jsxs as jsxs5 } from "react/jsx-runtime";
 function ProctoringIndicator(props) {
-  const { recording, sessionId, violations, online, brandPrimary = "#0f172a", paused } = props;
+  const { recording, sessionId, violations, online, brandPrimary = "#0f172a", paused, aiStatus } = props;
   return /* @__PURE__ */ jsxs5(
     "div",
     {
@@ -1673,6 +2527,24 @@ function ProctoringIndicator(props) {
           " violation",
           violations === 1 ? "" : "s"
         ] }),
+        aiStatus && /* @__PURE__ */ jsxs5(
+          "span",
+          {
+            style: {
+              color: aiStatus.ok ? "#15803d" : "#b45309",
+              fontWeight: 600,
+              maxWidth: 220,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap"
+            },
+            title: aiStatus.label,
+            children: [
+              "AI: ",
+              aiStatus.label
+            ]
+          }
+        ),
         sessionId && /* @__PURE__ */ jsxs5("span", { style: { color: "#94a3b8" }, children: [
           "#",
           sessionId.slice(0, 8)
@@ -1878,6 +2750,8 @@ var LABELS = {
   window_blur: "Lost window focus",
   window_focus: "Window focus returned",
   fullscreen_exit: "Fullscreen exited",
+  multiple_displays_detected: "Multiple displays detected",
+  single_display_detected: "External display disconnected",
   no_face_detected: "No face detected in camera",
   multiple_faces_detected: "Multiple faces detected",
   audio_voice_detected: "Background voice detected",
@@ -1921,6 +2795,14 @@ function ExamWindow(props) {
     branding: brandingProp,
     disableScreenRecording = false,
     faceCheckIntervalMs = 1e4,
+    serverAi = true,
+    analyzeMinIntervalMs = 500,
+    phoneCheckMinIntervalMs = 6e4,
+    identityReferenceImage,
+    identityReferenceUrl,
+    continuousIdentityCheck = true,
+    identityCheckIntervalMs = 1e4,
+    identityThreshold = 62,
     onSessionEnd,
     children
   } = props;
@@ -1941,29 +2823,70 @@ function ExamWindow(props) {
   const [seconds, setSeconds] = useState6(0);
   const [camMicStream, setCamMicStream] = useState6(null);
   const [screenStream, setScreenStream] = useState6(null);
+  const [enrolledReference, setEnrolledReference] = useState6(null);
+  const [enrolledCandidate, setEnrolledCandidate] = useState6(null);
+  const [identitySimilarity, setIdentitySimilarity] = useState6(null);
+  const [aiStatus, setAiStatus] = useState6(null);
   const hiddenVideoRef = useRef4(null);
+  const camMicStreamRef = useRef4(null);
   const camRecorderRef = useRef4(null);
   const screenRecorderRef = useRef4(null);
   const faceServiceRef = useRef4(null);
+  const identityServiceRef = useRef4(null);
   const audioRef = useRef4(null);
   const lockRef = useRef4(null);
   const netRef = useRef4(null);
   const ksRef = useRef4(null);
   const chatRef = useRef4(null);
+  const liveVideoRef = useRef4(null);
+  const lastViolationEmitRef = useRef4(/* @__PURE__ */ new Map());
   const accent = branding.accent_color || "#dc2626";
   const primary = branding.primary_color || "#0f172a";
+  useEffect6(() => {
+    camMicStreamRef.current = camMicStream;
+    const v = hiddenVideoRef.current;
+    if (camMicStream && v) void bindStreamToVideo(camMicStream, v);
+  }, [camMicStream, step]);
+  const captureSnapshotDataUrl = useCallback(async () => {
+    return captureFrameFromStream(camMicStreamRef.current, hiddenVideoRef.current);
+  }, []);
+  const pushViolationUi = useCallback((reason) => {
+    setViolations((prev) => prev.includes(reason) ? prev : [...prev, reason]);
+  }, []);
   const addViolation = useCallback(
-    (reason) => {
+    (reason, opts) => {
       setViolations((prev) => prev.includes(reason) ? prev : [...prev, reason]);
-      if (sessionId) {
-        void client.postSdkEvents({
-          session_id: sessionId,
-          events: [{ type: `violation.${reason}`, severity: "warn", occurred_at: (/* @__PURE__ */ new Date()).toISOString() }]
+      if (!sessionId) return;
+      const now = Date.now();
+      const cooldownMs = reason === "audio_voice_detected" ? 25e3 : reason.startsWith("keystroke_") ? 14e3 : reason.startsWith("network_") ? 35e3 : reason.startsWith("ai_") || reason.startsWith("gaze_") || reason === "phone_detected" || reason === "identity_mismatch" ? 4e3 : 12e3;
+      const last = lastViolationEmitRef.current.get(reason) ?? 0;
+      if (now - last < cooldownMs) return;
+      lastViolationEmitRef.current.set(reason, now);
+      void client.postSdkEvents({
+        session_id: sessionId,
+        events: [
+          {
+            type: `violation.${reason}`,
+            severity: opts?.severity ?? "warn",
+            occurred_at: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        ]
+      }).catch(() => {
+      });
+      void captureSnapshotDataUrl().then((img) => {
+        if (!img) return;
+        void client.postSnapshot(sessionId, {
+          image_base64: img,
+          caption: `Violation: ${reason}`,
+          label: reason,
+          source: "violation",
+          mime_type: "image/jpeg",
+          violation_context: { violation: reason, occurred_at: (/* @__PURE__ */ new Date()).toISOString() }
         }).catch(() => {
         });
-      }
+      });
     },
-    [client, sessionId]
+    [client, sessionId, captureSnapshotDataUrl]
   );
   useEffect6(() => {
     if (brandingProp) return;
@@ -1980,8 +2903,18 @@ function ExamWindow(props) {
     });
     setSessionId(data.session_id);
     setWsToken(data.ws_token);
+    if (!identityReferenceImage && !identityReferenceUrl) {
+      try {
+        const ref = await client.getIdentityReference(data.session_id);
+        if (ref.data?.enrolled && ref.data?.data_url) {
+          setEnrolledReference(ref.data.data_url);
+          setEnrolledCandidate(ref.data.candidate || null);
+        }
+      } catch {
+      }
+    }
     return data;
-  }, [client, examId, candidateId, externalRef]);
+  }, [client, examId, candidateId, externalRef, identityReferenceImage, identityReferenceUrl]);
   const startExam = useCallback(
     async (sid, token) => {
       const wsUrl = `${wsBase(baseUrl)}/v1/sdk/ws/sessions/${sid}`;
@@ -1998,6 +2931,15 @@ function ExamWindow(props) {
           onSessionEnd?.(sid);
         }
       });
+      liveVideoRef.current?.stop();
+      void LiveVideoSignaling.create(client, {
+        role: "candidate",
+        chat: chatRef.current,
+        getLocalStream: () => camMicStreamRef.current
+      }).then((sig) => {
+        liveVideoRef.current = sig;
+        sig.start();
+      });
       lockRef.current = new LockdownEnforcer();
       lockRef.current.start((r) => addViolation(r), {
         blockContextMenu: true,
@@ -2013,10 +2955,9 @@ function ExamWindow(props) {
       ksRef.current = new KeystrokeAnalyzer();
       ksRef.current.start((a) => addViolation(`keystroke_${a.reason}`));
       if (camMicStream) {
+        camMicStreamRef.current = camMicStream;
         if (hiddenVideoRef.current) {
-          hiddenVideoRef.current.srcObject = camMicStream;
-          await hiddenVideoRef.current.play().catch(() => {
-          });
+          await bindStreamToVideo(camMicStream, hiddenVideoRef.current);
         }
         camRecorderRef.current = new ChunkedRecorder({
           track: "camera",
@@ -2026,13 +2967,59 @@ function ExamWindow(props) {
         camRecorderRef.current.start(camMicStream);
         audioRef.current = new AudioAnalyzer();
         audioRef.current.on((r) => {
-          if (r.voice_detected && r.level > 0.18) addViolation("audio_voice_detected");
+          if (r.voice_detected && r.level > 0.32) addViolation("audio_voice_detected");
         });
-        audioRef.current.start(camMicStream);
+        audioRef.current.start(camMicStream, 4e3);
+        const reference = identityReferenceImage || enrolledReference;
         faceServiceRef.current = new FaceCheckService(client, sid, {
-          intervalMs: faceCheckIntervalMs
+          intervalMs: faceCheckIntervalMs,
+          getStream: () => camMicStreamRef.current,
+          serverAi,
+          persistServerAi: true,
+          analyzeMinIntervalMs,
+          phoneCheckMinIntervalMs,
+          referenceImage: reference || null,
+          identityThreshold,
+          onResult: (r) => {
+            if (r.violations.includes("no_face_detected")) addViolation("no_face_detected");
+            if (r.violations.includes("multiple_faces_detected")) addViolation("multiple_faces_detected");
+          },
+          onServerAnalysis: (r) => {
+            (r.violations || []).forEach((v) => addViolation(`ai_${v}`));
+            if (r.gaze_direction && r.gaze_direction !== "center" && (r.gaze_score ?? 0) > 0.6) {
+              addViolation(`gaze_${r.gaze_direction}`);
+            }
+            if (r.identity_match === false) addViolation("identity_mismatch");
+            if (r.identity_score != null) setIdentitySimilarity(r.identity_score);
+          },
+          onServerPhoneCheck: () => {
+          },
+          onServerTick: (r) => {
+            const gaze = r.gaze_direction && r.gaze_direction !== "center" ? ` gaze:${r.gaze_direction}` : "";
+            const viols = (r.violations || []).length ? ` \xB7 ${(r.violations || []).join(",")}` : "";
+            const ms = r.processing_time_ms != null ? ` \xB7 ${Math.round(r.processing_time_ms)}ms` : "";
+            setAiStatus({
+              ok: true,
+              label: `faces=${r.face_count ?? "?"}${gaze}${viols}${ms}`.slice(0, 96)
+            });
+          },
+          onServerError: (msg) => {
+            setAiStatus({ ok: false, label: msg.slice(0, 80) });
+          }
         });
         if (hiddenVideoRef.current) faceServiceRef.current.start(hiddenVideoRef.current);
+        if (continuousIdentityCheck && !serverAi && reference && hiddenVideoRef.current) {
+          identityServiceRef.current = new IdentityCheckService(client, sid, reference, {
+            intervalMs: identityCheckIntervalMs,
+            getStream: () => camMicStreamRef.current,
+            threshold: identityThreshold,
+            onResult: (r) => setIdentitySimilarity(r.similarity),
+            onMismatch: () => addViolation("identity_mismatch"),
+            onRestored: () => {
+            }
+          });
+          identityServiceRef.current.start(hiddenVideoRef.current);
+        }
       }
       if (screenStream) {
         screenRecorderRef.current = new ChunkedRecorder({
@@ -2047,43 +3034,106 @@ function ExamWindow(props) {
         camera: Boolean(camMicStream),
         screen: Boolean(screenStream)
       });
+      if (serverAi) {
+        void fetch(`${baseUrl.replace(/\/$/, "")}/health`).then((r) => r.json()).then((h) => {
+          if (h.ai !== "up") {
+            setError(
+              "Python AI sidecar is not reachable. Run `npm run dev:ai` in the repo root (port 5055), then refresh."
+            );
+          }
+        }).catch(() => {
+          setError("Cannot reach the API for AI health check. Confirm `npm run dev:api` is running.");
+        });
+      }
       setRecording(true);
     },
-    [baseUrl, camMicStream, client, screenStream, addViolation, faceCheckIntervalMs, onSessionEnd]
+    [
+      baseUrl,
+      camMicStream,
+      client,
+      screenStream,
+      addViolation,
+      pushViolationUi,
+      faceCheckIntervalMs,
+      onSessionEnd,
+      serverAi,
+      analyzeMinIntervalMs,
+      phoneCheckMinIntervalMs,
+      identityReferenceImage,
+      enrolledReference,
+      continuousIdentityCheck,
+      identityCheckIntervalMs,
+      identityThreshold
+    ]
   );
+  useEffect6(() => {
+    const ref = identityReferenceImage || enrolledReference;
+    faceServiceRef.current?.setReferenceImage(ref || null);
+  }, [identityReferenceImage, enrolledReference]);
   useEffect6(() => {
     if (step !== "exam") return;
     const t = setInterval(() => setSeconds((s) => paused ? s : s + 1), 1e3);
     return () => clearInterval(t);
   }, [step, paused]);
-  const tearDown = useCallback(() => {
-    camRecorderRef.current?.stop();
-    screenRecorderRef.current?.stop();
+  useEffect6(() => {
+    if (step !== "exam" || !sessionId || paused) return;
+    const tick = () => {
+      void captureSnapshotDataUrl().then((img) => {
+        if (!img) return;
+        void client.postSnapshot(sessionId, {
+          image_base64: img,
+          caption: "Live monitor frame",
+          source: "live_preview",
+          label: "live",
+          mime_type: "image/jpeg",
+          violation_context: { live_preview: true, ts: (/* @__PURE__ */ new Date()).toISOString() }
+        });
+      });
+    };
+    const id = window.setInterval(tick, 2e3);
+    tick();
+    return () => clearInterval(id);
+  }, [step, sessionId, paused, client, captureSnapshotDataUrl]);
+  const tearDown = useCallback(async () => {
+    await Promise.all([
+      camRecorderRef.current?.stop() ?? Promise.resolve(),
+      screenRecorderRef.current?.stop() ?? Promise.resolve()
+    ]);
     faceServiceRef.current?.stop();
+    identityServiceRef.current?.stop();
     audioRef.current?.stop();
     lockRef.current?.stop();
     netRef.current?.stop();
     ksRef.current?.stop();
+    liveVideoRef.current?.stop();
+    liveVideoRef.current = null;
     chatRef.current?.close();
     permsRef.current?.release();
     camRecorderRef.current = null;
     screenRecorderRef.current = null;
     faceServiceRef.current = null;
+    identityServiceRef.current = null;
     audioRef.current = null;
     lockRef.current = null;
     netRef.current = null;
     ksRef.current = null;
     chatRef.current = null;
   }, []);
-  useEffect6(() => () => tearDown(), [tearDown]);
+  useEffect6(
+    () => () => {
+      void tearDown();
+    },
+    [tearDown]
+  );
   const endExam = async () => {
     if (!sessionId) return;
     try {
+      await tearDown();
+      await new Promise((r) => setTimeout(r, 400));
       await client.endSession(sessionId, { status: "completed", success: true });
     } catch (e) {
       setError(e.message);
     }
-    tearDown();
     setRecording(false);
     setStep("submitted");
     onSessionEnd?.(sessionId);
@@ -2096,6 +3146,7 @@ function ExamWindow(props) {
       /* @__PURE__ */ jsx8("h1", { style: { margin: 0, fontSize: 22, color: primary }, children: branding.organization_name || "ProctorShield Exam" })
     ] }),
     error && /* @__PURE__ */ jsx8("p", { style: { color: "#b91c1c" }, children: error }),
+    camMicStream && /* @__PURE__ */ jsx8("video", { ref: hiddenVideoRef, autoPlay: true, muted: true, playsInline: true, style: { display: "none" }, "aria-hidden": true }),
     step === "permissions" && /* @__PURE__ */ jsxs8(Fragment2, { children: [
       branding.candidate_welcome_message && /* @__PURE__ */ jsx8("p", { style: { color: "#475569", marginBottom: 12 }, children: branding.candidate_welcome_message }),
       /* @__PURE__ */ jsx8(
@@ -2118,6 +3169,7 @@ function ExamWindow(props) {
         camMicStream,
         probeUrl: `${baseUrl}/health`,
         brandPrimary: primary,
+        onStreamAcquired: setCamMicStream,
         onComplete: async (results) => {
           try {
             const data = await initSession();
@@ -2139,6 +3191,9 @@ function ExamWindow(props) {
         sessionId,
         cameraStream: camMicStream,
         brandPrimary: primary,
+        referenceImage: identityReferenceImage || enrolledReference || void 0,
+        referenceUrl: identityReferenceUrl,
+        minSimilarity: identityThreshold,
         onDone: async () => {
           if (!sessionId || !wsToken) return;
           setStep("exam");
@@ -2160,7 +3215,8 @@ function ExamWindow(props) {
             violations: violations.length,
             online,
             brandPrimary: primary,
-            paused
+            paused,
+            aiStatus: serverAi ? aiStatus : null
           }
         ),
         /* @__PURE__ */ jsxs8("span", { style: { fontSize: 14, color: "#475569" }, children: [
@@ -2189,7 +3245,20 @@ function ExamWindow(props) {
         /* @__PURE__ */ jsxs8("small", { style: { color: "#64748b" }, children: [
           "Face checks every ",
           Math.round(faceCheckIntervalMs / 1e3),
-          "s \xB7 Camera + screen recording chunked every 10\u201315s"
+          "s \xB7 Camera + screen recording chunked every 10\u201315s",
+          serverAi && /* @__PURE__ */ jsxs8(Fragment2, { children: [
+            " ",
+            "\xB7 Unified AI every ",
+            analyzeMinIntervalMs < 1e3 ? `${analyzeMinIntervalMs}ms` : `${Math.round(analyzeMinIntervalMs / 1e3)}s`
+          ] }),
+          continuousIdentityCheck && !serverAi && (identityReferenceImage || enrolledReference) && /* @__PURE__ */ jsxs8(Fragment2, { children: [
+            " ",
+            "\xB7 Identity match every ",
+            Math.round(identityCheckIntervalMs / 1e3),
+            "s",
+            enrolledCandidate?.name ? ` vs. ${enrolledCandidate.name}` : "",
+            identitySimilarity != null && ` \xB7 similarity ${identitySimilarity.toFixed(2)}`
+          ] })
         ] }),
         /* @__PURE__ */ jsx8(
           "button",
@@ -2208,7 +3277,6 @@ function ExamWindow(props) {
           }
         )
       ] }),
-      /* @__PURE__ */ jsx8("video", { ref: hiddenVideoRef, autoPlay: true, muted: true, playsInline: true, style: { display: "none" } }),
       /* @__PURE__ */ jsx8(
         FloatingCameraWindow,
         {
