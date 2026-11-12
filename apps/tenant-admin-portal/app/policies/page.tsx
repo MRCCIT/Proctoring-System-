@@ -1,7 +1,17 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Card, DataTable, Td } from '@proctorshield/ui-components';
+import {
+  Alert,
+  Button,
+  Card,
+  DataTable,
+  EmptyState,
+  PageHeader,
+  TablePagination,
+  Td,
+  useClientPagination,
+} from '@proctorshield/ui-components';
 import { AuthGuard } from '@/components/AuthGuard';
 import { TenantAdminShell } from '@/components/TenantAdminShell';
 import { getClient } from '@/lib/api';
@@ -16,6 +26,7 @@ interface PolicyTemplate {
   severity_thresholds: Record<string, number>;
   whitelist: string[];
   is_default: boolean;
+  exam_count?: number;
   created_at: string;
 }
 
@@ -36,9 +47,10 @@ export default function PoliciesPage() {
   const [err, setErr] = useState('');
 
   const load = async () => {
+    setErr('');
     try {
       const r = await getClient().listPolicyTemplates();
-      setItems(r.data as PolicyTemplate[]);
+      setItems((r.data as PolicyTemplate[]) || []);
     } catch (e) {
       setErr((e as Error).message);
     }
@@ -51,6 +63,10 @@ export default function PoliciesPage() {
   const save = async () => {
     if (!editing) return;
     setErr('');
+    if (!String(editing.name || '').trim()) {
+      setErr('Enter a policy name before saving.');
+      return;
+    }
     try {
       const body = {
         name: editing.name,
@@ -90,19 +106,34 @@ export default function PoliciesPage() {
     });
   };
 
+  const pager = useClientPagination(items, 10);
+
   return (
     <AuthGuard>
       <TenantAdminShell>
-        <h1>Exam policy templates</h1>
-        <p className="muted">
-          Reusable proctoring rules: AI modules, thresholds, whitelist, sensitivity. Apply to exams.
-        </p>
-        {err && <p className="error">{err}</p>}
-        <button type="button" className="primary" onClick={startNew} style={{ marginBottom: 12 }}>
-          New policy template
-        </button>
-        <DataTable headers={['Name', 'Sensitivity', 'Modules', 'Default', '']}>
-          {items.map((p) => (
+        <PageHeader
+          title="Proctoring policies"
+          description="Reusable proctoring rules — AI modules, thresholds, allow-lists and sensitivity."
+          breadcrumbs={[{ label: 'Advanced' }, { label: 'Policies' }]}
+        />
+        {err && <Alert tone="danger">{err}</Alert>}
+        <div style={{ marginBottom: 12 }}>
+          <Button variant="primary" onClick={startNew}>
+            New policy template
+          </Button>
+        </div>
+        <DataTable
+          headers={['Name', 'Sensitivity', 'Modules', 'Default', 'Used by', '']}
+          isEmpty={!pager.pageItems.length}
+          empty={
+            <EmptyState
+              icon="shield"
+              title="No policies yet"
+              description="Starter Standard and Strict policies are created automatically on first open. Refresh if the list is empty."
+            />
+          }
+        >
+          {pager.pageItems.map((p) => (
             <tr key={p.id}>
               <Td>
                 <strong>{p.name}</strong>
@@ -111,6 +142,7 @@ export default function PoliciesPage() {
               <Td>{p.ai_sensitivity}</Td>
               <Td>{Object.entries(p.ai_modules || {}).filter(([, v]) => v).map(([k]) => k).join(', ')}</Td>
               <Td>{p.is_default ? 'Yes' : '—'}</Td>
+              <Td>{p.exam_count ?? 0} exam{(p.exam_count ?? 0) === 1 ? '' : 's'}</Td>
               <Td>
                 <button type="button" onClick={() => setEditing(p)} style={{ marginRight: 6 }}>
                   Edit
@@ -122,6 +154,14 @@ export default function PoliciesPage() {
             </tr>
           ))}
         </DataTable>
+        <TablePagination
+          page={pager.page}
+          pageSize={pager.pageSize}
+          total={pager.total}
+          pageCount={pager.pageCount}
+          onPageChange={pager.setPage}
+          onPageSizeChange={pager.setPageSize}
+        />
 
         {editing && (
           <div

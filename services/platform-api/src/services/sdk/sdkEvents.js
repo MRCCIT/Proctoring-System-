@@ -1,5 +1,7 @@
 import { query } from '../../config/database.js';
 import { assertSessionForTenant } from './candidateSessions.js';
+import { laneDecision } from '../queue/lanes.js';
+import { getTenantLoadLevel } from '../capacity/loadLevelStore.js';
 
 export async function insertSdkEventsBatch(tenantId, sessionId, eventsInput) {
   const row = await assertSessionForTenant(tenantId, sessionId);
@@ -44,6 +46,12 @@ export async function insertSdkEventsBatch(tenantId, sessionId, eventsInput) {
  * - { events: [ { session_id, type, ...}, ... ] }
  */
 export async function ingestSdkEvents(tenantId, body) {
+  const decision = laneDecision('violation.ingest', { loadLevel: getTenantLoadLevel(tenantId) });
+  if (!decision.allow) {
+    const e = new Error(`Violation ingest deferred (${decision.lane} at ${getTenantLoadLevel(tenantId)})`);
+    e.status = 503;
+    throw e;
+  }
   if (body.session_id && Array.isArray(body.events)) {
     return insertSdkEventsBatch(tenantId, body.session_id, body.events);
   }

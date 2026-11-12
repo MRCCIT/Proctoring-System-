@@ -82,6 +82,7 @@ export class IdentityCheckService {
   start(video: HTMLVideoElement) {
     if (this.timer) return;
     this.currentVideo = video;
+    void this.runOnce();
     this.timer = setInterval(() => void this.runOnce(), this.opts.intervalMs);
   }
 

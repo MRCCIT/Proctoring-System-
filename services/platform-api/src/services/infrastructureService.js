@@ -1,4 +1,5 @@
 import { query } from '../config/database.js';
+import { collectLiveProbes } from './observability/liveProbes.js';
 
 export async function getInfrastructureHealth() {
   const { rows: db } = await query(`SELECT 1 AS ok`);
@@ -16,9 +17,21 @@ export async function getInfrastructureHealth() {
     ORDER BY service_name, recorded_at DESC
   `);
 
+  let live = [];
+  let controls = {};
+  try {
+    const probes = await collectLiveProbes();
+    live = probes.live || [];
+    controls = probes.controls || {};
+  } catch {
+    live = [];
+  }
+
   return {
     checked_at: new Date().toISOString(),
     database: { status: dbHealthy ? 'healthy' : 'unhealthy' },
+    live,
+    controls,
     services: services.map((s) => ({
       name: s.service_name,
       status: s.status,

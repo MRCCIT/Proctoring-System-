@@ -20,7 +20,10 @@
     "build": "turbo run build",
     "lint": "turbo run lint",
     "db:migrate": "npm run db:migrate -w @proctorshield/platform-api",
-    "db:seed": "npm run db:seed -w @proctorshield/platform-api"
+    "db:seed": "npm run db:seed -w @proctorshield/platform-api",
+    "db:seed:scale": "node scripts/seed-scale-exams.mjs",
+    "db:seed:scale:large": "node scripts/seed-scale-exams.mjs --large",
+    "test:unit": "npm run test:unit -w @proctorshield/platform-api"
   },
   "devDependencies": {
     "turbo": "^2.3.3"

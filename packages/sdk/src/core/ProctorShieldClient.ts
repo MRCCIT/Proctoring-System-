@@ -8,10 +8,23 @@ import type {
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
+/** Session-scoped credentials returned to the candidate browser after a launch/link exchange. */
+export interface CandidateBootstrap {
+  session_id: string;
+  status: string;
+  candidate_name: string | null;
+  exam: { id: string | null; title: string | null };
+  session_token: string;
+  ws_token: string;
+  ws_url: string;
+}
+
 export interface ProctorShieldClientOptions {
   baseUrl: string;
   apiKey?: string;
   accessToken?: string;
+  /** Session-scoped candidate credential from a launch/access-link exchange (preferred in browsers). */
+  sessionToken?: string;
 }
 
 export class ProctorShieldClient {
@@ -21,7 +34,8 @@ export class ProctorShieldClient {
     const h = new Headers(init);
     h.set('Content-Type', 'application/json');
     if (this.options.accessToken) h.set('Authorization', `Bearer ${this.options.accessToken}`);
-    if (this.options.apiKey) h.set('X-API-Key', this.options.apiKey);
+    if (this.options.sessionToken) h.set('X-Session-Token', this.options.sessionToken);
+    else if (this.options.apiKey) h.set('X-API-Key', this.options.apiKey);
     return h;
   }
 
@@ -62,6 +76,12 @@ export class ProctorShieldClient {
   superadminLogin(email: string, password: string) {
     return this.request<SuperAdminLoginResponse>('POST', '/v1/superadmin/auth/login', { email, password });
   }
+  superadminMe() {
+    return this.request<{ data: { id: string; email: string; display_name: string | null } }>(
+      'GET',
+      '/v1/superadmin/auth/me'
+    );
+  }
   listTenants(cursor?: string, limit?: string) {
     return this.request<{ data: TenantSummary[]; next_cursor: string | null }>(
       'GET',
@@ -71,8 +91,66 @@ export class ProctorShieldClient {
   getTenant(id: string) {
     return this.request<{ data: TenantSummary }>('GET', `/v1/superadmin/tenants/${id}`);
   }
+  getTenantAnalyticsSa(id: string) {
+    return this.request<{
+      data: {
+        tenant_id: string;
+        usage: {
+          totals: {
+            exams: number;
+            candidates: number;
+            total_sessions: number;
+            active_sessions: number;
+            sessions_last_7d: number;
+            sessions_last_30d: number;
+            storage_bytes: string;
+            bytes_egress: string;
+            violation_flags: string;
+            flagged_sessions: number;
+            cleared_sessions: number;
+            awaiting_review: number;
+          };
+          sessions_per_day: { day: string; sessions: number }[];
+        };
+        violations: {
+          events_per_day: { day: string; events: number; serious: number }[];
+          top_event_types: Array<{
+            event_type: string;
+            code: string;
+            label: string;
+            category: string;
+            severity: string;
+            count: number;
+          }>;
+        };
+      };
+    }>('GET', `/v1/superadmin/tenants/${id}/analytics`);
+  }
   createTenant(body: Record<string, unknown>) {
-    return this.request<{ data: TenantSummary; api_key: string }>('POST', '/v1/superadmin/tenants', body);
+    return this.request<{
+      data: TenantSummary;
+      api_key: string;
+      invite_url?: string | null;
+      invite_expires_at?: string | null;
+      admin?: { id: string; email: string; role: string; status?: string } | null;
+    }>('POST', '/v1/superadmin/tenants', body);
+  }
+  issueTenantUserInviteLink(tenantId: string, userId: string) {
+    return this.request<{ data: { invite_url: string; expires_at: string; email: string } }>(
+      'POST',
+      `/v1/superadmin/tenants/${tenantId}/users/${userId}/invite-link`
+    );
+  }
+  issueTenantUserResetLink(tenantId: string, userId: string) {
+    return this.request<{
+      data: {
+        reset_url?: string;
+        invite_url?: string;
+        expires_at: string;
+        email: string;
+        kind?: string;
+      };
+    }>('POST', `/v1/superadmin/tenants/${tenantId}/users/${userId}/reset-link`);
   }
   updateTenant(id: string, body: Record<string, unknown>) {
     return this.request<{ data: TenantSummary }>('PATCH', `/v1/superadmin/tenants/${id}`, body);
@@ -80,8 +158,14 @@ export class ProctorShieldClient {
   suspendTenant(id: string) {
     return this.request<{ data: TenantSummary }>('POST', `/v1/superadmin/tenants/${id}/suspend`);
   }
+  activateTenant(id: string) {
+    return this.request<{ data: TenantSummary }>('POST', `/v1/superadmin/tenants/${id}/activate`);
+  }
   rotateTenantKey(id: string) {
     return this.request<{ data: TenantSummary; api_key: string }>('POST', `/v1/superadmin/tenants/${id}/rotate-key`);
+  }
+  listTenantUsersSa(id: string) {
+    return this.request<{ data: unknown[] }>('GET', `/v1/superadmin/tenants/${id}/users`);
   }
   listActiveSessionsSa(cursor?: string) {
     return this.request<{ data: unknown[]; next_cursor: string | null }>(
@@ -96,7 +180,21 @@ export class ProctorShieldClient {
     return this.request<{ data: unknown }>('GET', '/v1/superadmin/analytics/platform');
   }
   getTenantsCompare() {
-    return this.request<{ data: unknown[] }>('GET', '/v1/superadmin/analytics/tenants/compare');
+    return this.request<{
+      data: Array<{
+        tenant_id: string;
+        name: string;
+        slug: string;
+        status: string;
+        total_sessions: number;
+        active_sessions: number;
+        violation_flags_sum: string | number;
+        flagged_sessions: number;
+        awaiting_review: number;
+        success_rate: number | null;
+        storage_bytes: string | number;
+      }>;
+    }>('GET', '/v1/superadmin/analytics/tenants/compare');
   }
   listAuditLogs(params?: { cursor?: string; tenant_id?: string; action?: string }) {
     return this.request<{ data: unknown[]; next_cursor: string | null }>(
@@ -111,10 +209,156 @@ export class ProctorShieldClient {
   getInfrastructureHealth() {
     return this.request<{ data: unknown }>('GET', '/v1/superadmin/infrastructure/health');
   }
+  getInfrastructureOverview() {
+    return this.request<{ data: unknown }>('GET', '/v1/superadmin/infrastructure/overview');
+  }
+  getInfrastructureServices() {
+    return this.request<{ data: unknown[]; controls?: unknown; checked_at?: string }>(
+      'GET',
+      '/v1/superadmin/infrastructure/services'
+    );
+  }
+  getInfrastructureService(service: string) {
+    return this.request<{ data: unknown }>(
+      'GET',
+      `/v1/superadmin/infrastructure/services/${encodeURIComponent(service)}`
+    );
+  }
+  getInfrastructureHardware() {
+    return this.request<{ data: unknown }>('GET', '/v1/superadmin/infrastructure/hardware');
+  }
+  getInfrastructureQueues() {
+    return this.request<{ data: unknown }>('GET', '/v1/superadmin/infrastructure/queues');
+  }
+  getInfrastructureTenants() {
+    return this.request<{ data: unknown[] }>('GET', '/v1/superadmin/infrastructure/tenants');
+  }
+  getInfrastructureTenant(tenantId: string) {
+    return this.request<{ data: unknown }>(
+      'GET',
+      `/v1/superadmin/infrastructure/tenants/${encodeURIComponent(tenantId)}`
+    );
+  }
+  getInfrastructureTenantPolicies(tenantId: string) {
+    return this.request<{ data: unknown }>(
+      'GET',
+      `/v1/superadmin/infrastructure/tenants/${encodeURIComponent(tenantId)}/policies`
+    );
+  }
+  updateInfrastructureTenantPolicies(tenantId: string, body: Record<string, unknown>) {
+    return this.request<{ data: unknown }>(
+      'PUT',
+      `/v1/superadmin/infrastructure/tenants/${encodeURIComponent(tenantId)}/policies`,
+      body
+    );
+  }
+  getInfrastructureGlobalPolicies() {
+    return this.request<{ data: unknown }>('GET', '/v1/superadmin/infrastructure/global-policies');
+  }
+  updateInfrastructureGlobalPolicies(body: Record<string, unknown>) {
+    return this.request<{ data: unknown }>('PUT', '/v1/superadmin/infrastructure/global-policies', body);
+  }
+  rollbackInfrastructureControls(body?: Record<string, unknown>) {
+    return this.request<{ data: unknown }>('POST', '/v1/superadmin/infrastructure/controls/rollback', body || {});
+  }
+  getInfrastructureAlerts(params?: { status?: string; severity?: string; limit?: string }) {
+    return this.request<{ data: unknown[] }>(
+      'GET',
+      `/v1/superadmin/infrastructure/alerts${this.q({
+        status: params?.status,
+        severity: params?.severity,
+        limit: params?.limit,
+      })}`
+    );
+  }
+  acknowledgeInfrastructureAlert(id: string) {
+    return this.request<{ data: unknown }>(
+      'POST',
+      `/v1/superadmin/infrastructure/alerts/${encodeURIComponent(id)}/acknowledge`,
+      {}
+    );
+  }
+  resolveInfrastructureAlert(id: string) {
+    return this.request<{ data: unknown }>(
+      'POST',
+      `/v1/superadmin/infrastructure/alerts/${encodeURIComponent(id)}/resolve`,
+      {}
+    );
+  }
+  getInfrastructureRecommendations(params?: { status?: string; limit?: string }) {
+    return this.request<{ data: unknown[] }>(
+      'GET',
+      `/v1/superadmin/infrastructure/recommendations${this.q({
+        status: params?.status,
+        limit: params?.limit,
+      })}`
+    );
+  }
+  approveInfrastructureRecommendation(id: string) {
+    return this.request<{ data: unknown }>(
+      'POST',
+      `/v1/superadmin/infrastructure/recommendations/${encodeURIComponent(id)}/approve`,
+      {}
+    );
+  }
+  rejectInfrastructureRecommendation(id: string) {
+    return this.request<{ data: unknown }>(
+      'POST',
+      `/v1/superadmin/infrastructure/recommendations/${encodeURIComponent(id)}/reject`,
+      {}
+    );
+  }
+  getInfrastructureControlAudit(params?: { cursor?: string; limit?: string; tenant_id?: string }) {
+    return this.request<{ data: unknown[]; next_cursor: string | null }>(
+      'GET',
+      `/v1/superadmin/infrastructure/audit-logs${this.q({
+        next_cursor: params?.cursor,
+        limit: params?.limit,
+        tenant_id: params?.tenant_id,
+      })}`
+    );
+  }
 
   /* Tenant Admin */
   tenantLogin(tenant_slug: string, email: string, password: string) {
     return this.request<TenantAdminLoginResponse>('POST', '/v1/tenant/auth/login', { tenant_slug, email, password });
+  }
+  peekTenantInvite(token: string) {
+    return this.request<{
+      data: {
+        email: string;
+        display_name?: string | null;
+        tenant_slug: string;
+        tenant_name?: string;
+        expires_at: string;
+        status: string;
+      };
+    }>('GET', `/v1/tenant/auth/invite/${encodeURIComponent(token)}`);
+  }
+  peekTenantReset(token: string) {
+    return this.request<{
+      data: {
+        email: string;
+        display_name?: string | null;
+        tenant_slug: string;
+        tenant_name?: string;
+        expires_at: string;
+        status: string;
+      };
+    }>('GET', `/v1/tenant/auth/reset/${encodeURIComponent(token)}`);
+  }
+  acceptTenantInvite(body: { token: string; password: string; display_name?: string }) {
+    return this.request<TenantAdminLoginResponse>('POST', '/v1/tenant/auth/accept-invite', body);
+  }
+  forgotTenantPassword(body: { tenant_slug: string; email: string }) {
+    return this.request<{ ok: boolean; message: string; reset_url?: string; invite_url?: string }>(
+      'POST',
+      '/v1/tenant/auth/forgot-password',
+      body
+    );
+  }
+  resetTenantPassword(body: { token: string; password: string }) {
+    return this.request<TenantAdminLoginResponse>('POST', '/v1/tenant/auth/reset-password', body);
   }
   listExams(cursor?: string) {
     return this.request<{ data: unknown[]; next_cursor: string | null }>(
@@ -300,6 +544,27 @@ export class ProctorShieldClient {
   }
   getAttendanceReportCsv(examId: string) {
     return `${this.options.baseUrl.replace(/\/$/, '')}/v1/reports/exam/${examId}/attendance?format=csv`;
+  }
+
+  /* Candidate entry (no API key): launch token from the integration API or a tenant access link */
+  exchangeLaunchToken(launch_token: string) {
+    return this.request<{ data: CandidateBootstrap }>('POST', '/v1/sdk/public/launch/exchange', { launch_token });
+  }
+  describeAccessLink(token: string) {
+    return this.request<{
+      data: {
+        organization: string | null;
+        branding: Record<string, unknown> | null;
+        exam: { id: string; title: string } | null;
+        requires_exam_title: boolean;
+      };
+    }>('GET', `/v1/sdk/public/links/describe${this.q({ token })}`);
+  }
+  startFromAccessLink(body: { link_token: string; candidate_name: string; exam_title?: string; candidate_email?: string }) {
+    return this.request<{ data: CandidateBootstrap }>('POST', '/v1/sdk/public/links/start', {
+      ...body,
+      client_platform: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+    });
   }
 
   /* Candidate SDK */

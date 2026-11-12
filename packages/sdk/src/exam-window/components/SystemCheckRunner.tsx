@@ -120,7 +120,10 @@ export function SystemCheckRunner(props: SystemCheckRunnerProps) {
     <section style={{ maxWidth: 640 }}>
       <h2 style={{ marginBottom: 4 }}>Pre-exam system check</h2>
       <p style={{ color: '#475569', fontSize: 14, marginBottom: 12 }}>
-        Verifying hardware, network, and environment readiness.
+        Verifying hardware, network, and environment readiness.{' '}
+        <a href="/system-check.html" target="_blank" rel="noreferrer" style={{ color: brandPrimary }}>
+          Open extended system check
+        </a>
       </p>
       <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
         {steps.map((s) => (

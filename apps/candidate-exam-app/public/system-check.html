@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ProctorShield system check</title>
+    <style>
+      body { font-family: Georgia, serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #0f172a; background: #f8fafc; }
+      h1 { font-size: 1.6rem; }
+      li { margin: 8px 0; }
+      .ok { color: #15803d; }
+      .fail { color: #b91c1c; }
+      .muted { color: #64748b; font-size: 0.9rem; }
+      button { margin-top: 16px; padding: 10px 14px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>Pre-exam system check</h1>
+    <p class="muted">
+      A normal browser cannot be fully locked. This page checks camera, mic, fullscreen, and basic browser signals before the exam gate.
+    </p>
+    <ul id="list"></ul>
+    <button id="run" type="button">Run checks</button>
+    <script>
+      const list = document.getElementById('list');
+      function row(label, ok, detail) {
+        const li = document.createElement('li');
+        li.className = ok ? 'ok' : 'fail';
+        li.textContent = (ok ? 'PASS' : 'FAIL') + ' — ' + label + (detail ? ' (' + detail + ')' : '');
+        list.appendChild(li);
+      }
+      document.getElementById('run').onclick = async () => {
+        list.innerHTML = '';
+        row('Secure context (HTTPS or localhost)', window.isSecureContext);
+        row('MediaDevices API', !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          const vids = stream.getVideoTracks().length;
+          const auds = stream.getAudioTracks().length;
+          row('Camera', vids > 0, vids + ' track(s)');
+          row('Microphone', auds > 0, auds + ' track(s)');
+          stream.getTracks().forEach((t) => t.stop());
+        } catch (e) {
+          row('Camera / microphone', false, e.message);
+        }
+        row('Fullscreen API', typeof document.documentElement.requestFullscreen === 'function');
+        row('Not webdriver', !navigator.webdriver);
+        row('BroadcastChannel (single-tab helper)', typeof BroadcastChannel !== 'undefined');
+      };
+    </script>
+  </body>
+</html>

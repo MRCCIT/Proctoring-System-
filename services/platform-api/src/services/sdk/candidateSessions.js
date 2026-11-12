@@ -1,8 +1,13 @@
 import crypto from 'crypto';
-import { query } from '../../config/database.js';
+import { pool, query } from '../../config/database.js';
 import { config } from '../../config/index.js';
-import { signSdkWsToken } from '../../utils/jwt.js';
+import { signSdkWsToken, signSdkSessionToken } from '../../utils/jwt.js';
+import { getOrCreateExamLockdownPolicy } from '../lockdown/policyStore.js';
+import { getExamLoadLevel, getTenantLoadLevel, policyForLevel } from '../capacity/loadLevelStore.js';
 import { mergeSessionRecordings } from '../tenant/recordingMerge.js';
+import { emitWebhookEvent } from '../webhooks/dispatcher.js';
+import { assertSessionAdmission, onSessionStarted, onSessionEnded } from '../infra/admissionControl.js';
+import { resolveEffectivePolicy } from '../tenant/resolvePolicy.js';
 
 export function buildSdkWsUrl(sessionId) {
   const base = config.publicApiBaseUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
@@ -15,8 +20,25 @@ export async function assertSessionForTenant(tenantId, sessionId) {
 }
 
 export async function initSdkSession(tenantId, body) {
-  const exam_id = body.exam_id || null;
-  const candidate_id = body.candidate_id || null;
+  let exam_id = body.exam_id || null;
+  let candidate_id = body.candidate_id || null;
+  const candidate_name = body.candidate_name ? String(body.candidate_name).trim().slice(0, 200) || null : null;
+  const exam_title = body.exam_title ? String(body.exam_title).trim().slice(0, 300) || null : null;
+  if (!exam_id && exam_title) {
+    const { findOrCreateExamContext } = await import('../integration/sessions.js');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const exam = await findOrCreateExamContext(client, tenantId, { exam_title, source: 'sdk' });
+      await client.query('COMMIT');
+      exam_id = exam.id;
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
   if (exam_id) {
     const ex = await query(`SELECT id FROM exams WHERE id = $1 AND tenant_id = $2`, [exam_id, tenantId]);
     if (!ex.rows.length) {
@@ -44,9 +66,14 @@ export async function initSdkSession(tenantId, body) {
   };
   const scheduled_start = body.scheduled_start || null;
   const scheduled_end = body.scheduled_end || null;
+  await assertSessionAdmission(tenantId);
+  const policy = await resolveEffectivePolicy(tenantId, {
+    examId: exam_id,
+    overrides: body.ai_config && typeof body.ai_config === 'object' ? body.ai_config : null,
+  });
   const { rows } = await query(
-    `INSERT INTO exam_sessions (tenant_id, exam_id, candidate_id, external_ref, status, sdk_init_meta, scheduled_start, scheduled_end, ai_config)
-     VALUES ($1, $2, $3, $4, 'scheduled', $5::jsonb, $6::timestamptz, $7::timestamptz, $8::jsonb)
+    `INSERT INTO exam_sessions (tenant_id, exam_id, candidate_id, external_ref, status, sdk_init_meta, scheduled_start, scheduled_end, ai_config, candidate_name)
+     VALUES ($1, $2, $3, $4, 'scheduled', $5::jsonb, $6::timestamptz, $7::timestamptz, $8::jsonb, $9)
      RETURNING id, created_at`,
     [
       tenantId,
@@ -56,26 +83,40 @@ export async function initSdkSession(tenantId, body) {
       JSON.stringify(sdk_init_meta),
       scheduled_start,
       scheduled_end,
-      JSON.stringify(body.ai_config || {}),
+      JSON.stringify(policy),
+      candidate_name,
     ]
   );
   const session = rows[0];
   const ws_token = signSdkWsToken({ tid: tenantId, sid: session.id }, 86400);
   const ws_url = buildSdkWsUrl(session.id);
 
+  // Auto-enroll: anyone who starts an exam appears on the Candidates list.
   if (!candidate_id && external_ref && String(external_ref).trim()) {
-    const match = await query(
-      `SELECT id FROM candidates
-       WHERE tenant_id = $1 AND lower(trim(external_ref)) = lower(trim($2))
-       LIMIT 1`,
-      [tenantId, external_ref]
-    );
-    if (match.rows[0]) {
-      await query(`UPDATE exam_sessions SET candidate_id = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3`, [
-        match.rows[0].id,
-        session.id,
-        tenantId,
-      ]);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { findOrCreateCandidate } = await import('../integration/sessions.js');
+      const emailRaw = body.candidate_email ? String(body.candidate_email).trim().toLowerCase() : '';
+      const cand = await findOrCreateCandidate(client, tenantId, {
+        external_candidate_id: String(external_ref).trim(),
+        candidate_name: candidate_name || String(external_ref).trim(),
+        candidate_email: emailRaw || null,
+      });
+      await client.query(
+        `UPDATE exam_sessions
+            SET candidate_id = $1,
+                candidate_name = COALESCE(NULLIF(candidate_name, ''), $2),
+                updated_at = now()
+          WHERE id = $3 AND tenant_id = $4`,
+        [cand.id, candidate_name || cand.name, session.id, tenantId]
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
     }
   }
 
@@ -90,7 +131,7 @@ export async function initSdkSession(tenantId, body) {
 
 export async function getSdkSessionConfig(tenantId, sessionId) {
   const { rows } = await query(
-    `SELECT s.id, s.status, s.ai_config, s.scheduled_start, s.scheduled_end, s.exam_id,
+    `SELECT s.id, s.status, s.ai_config, s.scheduled_start, s.scheduled_end, s.exam_id, s.candidate_name,
             e.title AS exam_title, e.ai_sensitivity, e.ai_modules, e.policy_template, e.branding, e.scheduling AS exam_scheduling,
             t.feature_flags AS tenant_feature_flags
      FROM exam_sessions s
@@ -101,10 +142,20 @@ export async function getSdkSessionConfig(tenantId, sessionId) {
   );
   const row = rows[0];
   if (!row) return null;
+  let lockdown_policy = null;
+  if (row.exam_id) {
+    try {
+      lockdown_policy = await getOrCreateExamLockdownPolicy(tenantId, row.exam_id);
+    } catch {
+      lockdown_policy = null;
+    }
+  }
+  const load_level = row.exam_id ? getExamLoadLevel(tenantId, row.exam_id) : getTenantLoadLevel(tenantId);
   return {
     session: {
       id: row.id,
       status: row.status,
+      candidate_name: row.candidate_name,
       scheduled_start: row.scheduled_start,
       scheduled_end: row.scheduled_end,
     },
@@ -120,6 +171,17 @@ export async function getSdkSessionConfig(tenantId, sessionId) {
         }
       : null,
     tenant_feature_flags: row.tenant_feature_flags,
+    policy: row.ai_config && typeof row.ai_config === 'object' && row.ai_config.ai_modules
+      ? row.ai_config
+      : {
+          source: 'exam',
+          ai_modules: row.ai_modules || {},
+          ai_sensitivity: row.ai_sensitivity || 'normal',
+          grace_period_seconds: 5,
+          severity_thresholds: { warn: 1, flag: 3, terminate: 8 },
+          whitelist: {},
+          rules: row.policy_template || {},
+        },
     effective_ai_config: {
       session: row.ai_config,
       exam_modules: row.ai_modules,
@@ -137,6 +199,16 @@ export async function getSdkSessionConfig(tenantId, sessionId) {
       screen_capture_mitigation: true,
       extension_interference: 'blocked',
     },
+    lockdown_policy,
+    load_level,
+    load_policy: policyForLevel(load_level),
+  };
+}
+
+export function issueCandidateCredentials(tenantId, sessionId) {
+  return {
+    session_token: signSdkSessionToken({ tid: tenantId, sid: sessionId }),
+    ws_token: signSdkWsToken({ tid: tenantId, sid: sessionId }),
   };
 }
 
@@ -198,18 +270,86 @@ export async function startMediaStream(tenantId, sessionId, body) {
     e.status = 404;
     throw e;
   }
+  const { rows: prev } = await query(`SELECT status FROM exam_sessions WHERE id = $1 AND tenant_id = $2`, [
+    sessionId,
+    tenantId,
+  ]);
+  if (['completed', 'failed', 'terminated'].includes(prev[0]?.status)) {
+    const e = new Error(`Session is already ${prev[0].status}`);
+    e.status = 409;
+    throw e;
+  }
   const { rows } = await query(
     `UPDATE exam_sessions
-     SET stream_started_at = now(),
+     SET stream_started_at = COALESCE(stream_started_at, now()),
          status = CASE WHEN status = 'scheduled' THEN 'active' ELSE status END,
          started_at = COALESCE(started_at, now()),
+         connection_state = 'connected',
+         last_heartbeat_at = now(),
          updated_at = now(),
          sdk_init_meta = sdk_init_meta || $2::jsonb
      WHERE id = $1 AND tenant_id = $3
      RETURNING id, status, stream_started_at, started_at`,
     [sessionId, JSON.stringify({ stream: body?.transport || {} }), tenantId]
   );
+  if (prev[0]?.status === 'scheduled') {
+    void onSessionStarted(tenantId);
+    void emitSessionWebhook(tenantId, sessionId, 'proctoring.session.started');
+  }
   return rows[0];
+}
+
+export async function emitSessionWebhook(tenantId, sessionId, eventType, extra = {}) {
+  try {
+    const { getIntegrationSession, webhookSessionData } = await import('../integration/sessions.js');
+    const s = await getIntegrationSession(tenantId, sessionId);
+    if (!s) return;
+    await emitWebhookEvent(tenantId, eventType, { ...webhookSessionData(s), ...extra });
+  } catch (e) {
+    console.warn('[webhooks] session event failed', eventType, e.message);
+  }
+}
+
+/**
+ * Close a proctoring session exactly once. Repeated calls return the existing closed state
+ * (idempotent) instead of overwriting the original outcome.
+ */
+export async function closeSession(tenantId, sessionId, { status = 'completed', reason = null, success } = {}) {
+  const allowed = ['completed', 'failed', 'terminated'];
+  const nextStatus = allowed.includes(status) ? status : 'completed';
+  const { rows } = await query(
+    `UPDATE exam_sessions
+     SET status = $2,
+         ended_at = COALESCE(ended_at, now()),
+         stream_ended_at = COALESCE(stream_ended_at, now()),
+         success = COALESCE($3::boolean, success),
+         connection_state = 'closed',
+         updated_at = now(),
+         sdk_init_meta = sdk_init_meta || $4::jsonb
+     WHERE id = $1 AND tenant_id = $5 AND status NOT IN ('completed', 'failed', 'terminated')
+     RETURNING id, status, ended_at`,
+    [sessionId, nextStatus, success === undefined ? null : success, JSON.stringify({ end: { reason } }), tenantId]
+  );
+  if (!rows[0]) {
+    const { rows: cur } = await query(`SELECT id, status, ended_at FROM exam_sessions WHERE id = $1 AND tenant_id = $2`, [
+      sessionId,
+      tenantId,
+    ]);
+    return { session: cur[0] || null, alreadyClosed: Boolean(cur[0]) };
+  }
+  void onSessionEnded(tenantId);
+  try {
+    await mergeSessionRecordings(tenantId, sessionId);
+  } catch (e) {
+    console.warn('[recording] merge on session end failed:', e.message);
+  }
+  void import('../media/postExamProcess.js')
+    .then((m) => m.runPostExamMediaJob(tenantId, sessionId))
+    .catch((e) => console.warn('[media] post-exam stub failed:', e.message));
+  const evt = nextStatus === 'terminated' ? 'proctoring.session.terminated' : 'proctoring.session.completed';
+  void emitSessionWebhook(tenantId, sessionId, evt, { reason });
+  void emitSessionWebhook(tenantId, sessionId, 'proctoring.evidence.available');
+  return { session: rows[0], alreadyClosed: false };
 }
 
 export async function endSdkSession(tenantId, sessionId, body) {
@@ -219,26 +359,10 @@ export async function endSdkSession(tenantId, sessionId, body) {
     e.status = 404;
     throw e;
   }
-  const success = body?.success;
-  const status = body?.status || 'completed';
-  const allowed = ['completed', 'failed', 'terminated'];
-  const nextStatus = allowed.includes(status) ? status : 'completed';
-  const { rows } = await query(
-    `UPDATE exam_sessions
-     SET status = $2,
-         ended_at = COALESCE(ended_at, now()),
-         stream_ended_at = COALESCE(stream_ended_at, now()),
-         success = COALESCE($3::boolean, success),
-         updated_at = now(),
-         sdk_init_meta = sdk_init_meta || $4::jsonb
-     WHERE id = $1 AND tenant_id = $5
-     RETURNING id, status, ended_at`,
-    [sessionId, nextStatus, success === undefined ? null : success, JSON.stringify({ end: { reason: body?.reason } }), tenantId]
-  );
-  try {
-    await mergeSessionRecordings(tenantId, sessionId);
-  } catch (e) {
-    console.warn('[recording] merge on session end failed:', e.message);
-  }
-  return rows[0];
+  const { session } = await closeSession(tenantId, sessionId, {
+    status: body?.status || 'completed',
+    reason: body?.reason || null,
+    success: body?.success,
+  });
+  return session;
 }

@@ -13,13 +13,48 @@ const DEFAULT_AI_MODULES = {
 
 const DEFAULT_THRESHOLDS = { warn: 1, flag: 3, terminate: 8 };
 
+const STRICT_AI_MODULES = {
+  ...DEFAULT_AI_MODULES,
+  keystroke: true,
+  audio_voice: true,
+  audio_noise: true,
+};
+
+/** Ensure every tenant has usable starter policies (not only the seed demo org). */
+export async function ensureDefaultPolicyTemplates(tenantId) {
+  const { rows } = await query(`SELECT id FROM policy_templates WHERE tenant_id = $1 LIMIT 1`, [tenantId]);
+  if (rows.length) return;
+
+  await query(
+    `INSERT INTO policy_templates
+       (tenant_id, name, description, ai_modules, ai_sensitivity, grace_period_seconds, severity_thresholds, whitelist, is_default)
+     VALUES
+       ($1, 'Standard', 'Default proctoring policy — face, gaze, objects, audio and network checks.',
+        $2::jsonb, 'normal', 5, $3::jsonb, '[]'::jsonb, true),
+       ($1, 'Strict', 'High-sensitivity policy for high-stakes exams.',
+        $4::jsonb, 'high', 3, $5::jsonb, '[]'::jsonb, false)`,
+    [
+      tenantId,
+      JSON.stringify(DEFAULT_AI_MODULES),
+      JSON.stringify(DEFAULT_THRESHOLDS),
+      JSON.stringify(STRICT_AI_MODULES),
+      JSON.stringify({ warn: 1, flag: 2, terminate: 5 }),
+    ]
+  );
+}
+
 export async function listPolicyTemplates(tenantId) {
+  await ensureDefaultPolicyTemplates(tenantId);
   const { rows } = await query(
-    `SELECT id, name, description, rules, ai_modules, ai_sensitivity, grace_period_seconds,
-            severity_thresholds, whitelist, is_default, created_at, updated_at
-       FROM policy_templates
-      WHERE tenant_id = $1
-      ORDER BY is_default DESC, created_at DESC`,
+    `SELECT p.id, p.name, p.description, p.rules, p.ai_modules, p.ai_sensitivity, p.grace_period_seconds,
+            p.severity_thresholds, p.whitelist, p.is_default, p.created_at, p.updated_at,
+            COALESCE((
+              SELECT COUNT(*)::int FROM exams e
+               WHERE e.tenant_id = p.tenant_id AND e.policy_template_id = p.id
+            ), 0) AS exam_count
+       FROM policy_templates p
+      WHERE p.tenant_id = $1
+      ORDER BY p.is_default DESC, p.created_at DESC`,
     [tenantId]
   );
   return rows;

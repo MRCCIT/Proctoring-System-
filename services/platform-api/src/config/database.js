@@ -11,4 +11,13 @@ export async function query(text, params) {
   return pool.query(text, params);
 }
 
+export function getPoolStats() {
+  return {
+    total: pool.totalCount,
+    idle: pool.idleCount,
+    waiting: pool.waitingCount,
+    max: pool.options?.max ?? null,
+  };
+}
+
 export { pool };

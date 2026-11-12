@@ -31,14 +31,19 @@ export async function listActiveSessions({ cursor, limit: rawLimit }) {
       t.slug AS tenant_slug,
       s.external_ref,
       s.status,
+      s.connection_state,
+      s.last_heartbeat_at,
       s.started_at,
       s.bytes_egress,
       s.storage_bytes,
       s.violation_flags,
       s.country_code,
-      s.created_at
+      s.created_at,
+      COALESCE(NULLIF(trim(e.title), ''), 'Untitled exam') AS exam_title,
+      e.id AS exam_id
     FROM exam_sessions s
     JOIN tenants t ON t.id = s.tenant_id
+    LEFT JOIN exams e ON e.id = s.exam_id
     ${where}
     ORDER BY COALESCE(s.started_at, s.created_at) DESC NULLS LAST, s.id DESC
     LIMIT $${limIdx}
@@ -57,9 +62,14 @@ export async function listActiveSessions({ cursor, limit: rawLimit }) {
 
 export async function getSessionById(sessionId) {
   const { rows } = await query(
-    `SELECT s.*, t.name AS tenant_name, t.slug AS tenant_slug, t.status AS tenant_status
+    `SELECT s.*,
+            t.name AS tenant_name,
+            t.slug AS tenant_slug,
+            t.status AS tenant_status,
+            COALESCE(NULLIF(trim(e.title), ''), 'Untitled exam') AS exam_title
      FROM exam_sessions s
      JOIN tenants t ON t.id = s.tenant_id
+     LEFT JOIN exams e ON e.id = s.exam_id
      WHERE s.id = $1`,
     [sessionId]
   );

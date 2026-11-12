@@ -4,7 +4,13 @@ import {
   writeBuffer,
   mergedRecordingKey,
   fileExists,
+  abs,
 } from '../../storage/localStorage.js';
+import {
+  compressRecordingBuffer,
+  ffmpegAvailable,
+  isRecordingCompressEnabled,
+} from './videoCompress.js';
 
 /** Reserved sequence for one merged file per track (camera / screen). */
 export const MERGED_SEQUENCE = 999999;
@@ -48,7 +54,8 @@ function isMergedRow(row) {
 
 /**
  * Concatenate persisted WebM chunk files per track into one playable file.
- * MediaRecorder timeslice fragments are not valid standalone videos; merging fixes playback.
+ * When ffmpeg is available, re-encodes to compressed H.264 MP4 (seekable, smaller).
+ * Falls back to raw WebM concat if ffmpeg is missing or compression is disabled.
  */
 export async function mergeSessionRecordings(tenantId, sessionId) {
   const candidateLabel = await getSessionCandidateLabel(tenantId, sessionId);
@@ -67,6 +74,13 @@ export async function mergeSessionRecordings(tenantId, sessionId) {
   for (const c of segmentChunks) {
     if (!byTrack.has(c.track)) byTrack.set(c.track, []);
     byTrack.get(c.track).push(c);
+  }
+
+  const wantCompress = isRecordingCompressEnabled() && (await ffmpegAvailable());
+  if (isRecordingCompressEnabled() && !wantCompress) {
+    console.warn(
+      '[recordingMerge] ffmpeg not found — storing raw merged WebM. Install ffmpeg or set FFMPEG_PATH for compression.'
+    );
   }
 
   const merged = [];
@@ -92,10 +106,48 @@ export async function mergeSessionRecordings(tenantId, sessionId) {
 
     if (!buffers.length) continue;
 
-    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
-    const relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
-    const mergedBuf = Buffer.concat(buffers);
-    writeBuffer(relKey, mergedBuf);
+    const rawMerged = Buffer.concat(buffers);
+    let relKey;
+    let outBytes;
+    let outMime;
+    let ext;
+    let compressMeta = { compressed: false };
+
+    if (wantCompress) {
+      try {
+        ext = 'mp4';
+        relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
+        const result = await compressRecordingBuffer(rawMerged, {
+          workDirRel: `recordings/${tenantId}/${sessionId}/merged/_tmp`,
+          outputRelKey: relKey,
+        });
+        outBytes = result.bytes;
+        outMime = result.mime_type;
+        compressMeta = {
+          compressed: true,
+          codec: 'h264+aac',
+          crf: result.crf,
+          preset: result.preset,
+          max_height: result.maxHeight,
+          raw_bytes: rawMerged.length,
+          ratio: rawMerged.length ? Number((outBytes / rawMerged.length).toFixed(3)) : null,
+        };
+      } catch (e) {
+        console.warn('[recordingMerge] compress failed, falling back to raw WebM:', e.message);
+        ext = mime.includes('mp4') ? 'mp4' : 'webm';
+        relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
+        writeBuffer(relKey, rawMerged);
+        outBytes = rawMerged.length;
+        outMime = mime;
+        compressMeta = { compressed: false, compress_error: String(e.message || e).slice(0, 240) };
+      }
+    } else {
+      ext = mime.includes('mp4') ? 'mp4' : 'webm';
+      relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
+      writeBuffer(relKey, rawMerged);
+      outBytes = rawMerged.length;
+      outMime = mime;
+    }
 
     const displayName = `${slug}-${track}.${ext}`;
     const metadata = {
@@ -103,7 +155,8 @@ export async function mergeSessionRecordings(tenantId, sessionId) {
       candidate_label: candidateLabel,
       display_name: displayName,
       segment_count: list.length,
-      mime,
+      mime: outMime,
+      ...compressMeta,
     };
 
     const { rows } = await query(
@@ -127,29 +180,41 @@ export async function mergeSessionRecordings(tenantId, sessionId) {
         MERGED_SEQUENCE,
         relKey,
         totalDuration || null,
-        mergedBuf.length,
+        outBytes,
         earliest,
         latest,
         JSON.stringify(metadata),
         relKey,
-        mime,
+        outMime,
       ]
     );
 
     merged.push(rows[0]);
 
-    const primaryKey =
-      track === 'camera' ? relKey : null;
-    if (primaryKey && fileExists(primaryKey)) {
+    if (track === 'camera' && fileExists(relKey)) {
       await query(
         `UPDATE exam_sessions SET recording_object_key = $1, updated_at = now()
          WHERE id = $2 AND tenant_id = $3`,
-        [primaryKey, sessionId, tenantId]
+        [relKey, sessionId, tenantId]
       );
+    }
+
+    // Drop leftover uncompressed twin if we switched extension (e.g. .webm → .mp4)
+    if (wantCompress && compressMeta.compressed && ext === 'mp4') {
+      const legacyWebm = mergedRecordingKey(tenantId, sessionId, slug, track, 'webm');
+      if (legacyWebm !== relKey) {
+        try {
+          const { default: fs } = await import('fs');
+          const p = abs(legacyWebm);
+          if (fs.existsSync(p)) fs.unlinkSync(p);
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 
-  return { candidate_label: candidateLabel, merged };
+  return { candidate_label: candidateLabel, merged, compressed: wantCompress };
 }
 
 export async function listSessionRecordingsForPlayback(tenantId, sessionId) {

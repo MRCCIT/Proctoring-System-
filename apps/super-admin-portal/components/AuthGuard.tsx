@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { Spinner } from '@proctorshield/ui-components';
 import { superAdminTokens } from '@/lib/api';
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -19,8 +20,8 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 
   if (status !== 'authed') {
     return (
-      <div suppressHydrationWarning style={{ padding: 24, color: '#64748b', fontFamily: 'system-ui' }}>
-        {status === 'checking' ? 'Loading...' : 'Redirecting to login...'}
+      <div style={{ padding: 48 }}>
+        <Spinner label={status === 'checking' ? 'Loading…' : 'Redirecting to login…'} />
       </div>
     );
   }

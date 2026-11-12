@@ -8,6 +8,10 @@ import {
   listSnapshots,
   assertSessionBelongs,
 } from '../../services/tenant/sessions.js';
+import { listSessionsEnriched, listLiveSessionsEnriched } from '../../services/tenant/sessionQueries.js';
+import { ingestLockdownEvents } from '../../services/lockdown/events.js';
+import { requireSebWhenStrict } from '../../middleware/sebIntegrity.js';
+import { presignMediaChunk, completeMediaChunk } from '../../services/media/chunkPresign.js';
 import { buildRecordingSignedUrl, buildSessionReportSignedUrl } from '../../services/tenant/sdk.js';
 import {
   pauseSession,
@@ -19,6 +23,7 @@ import {
 import { listSessionChatMessages, postProctorChatMessage, broadcastChat } from '../../services/tenant/chat.js';
 import { listSessionFaceChecks } from '../../services/tenant/recording.js';
 import { listSessionRecordingsForPlayback } from '../../services/tenant/recordingMerge.js';
+import { bulkSessionActions } from '../../services/tenant/bulkSessions.js';
 import { problemDetails, ProblemTypes } from '../../utils/problemDetails.js';
 import { isUuid } from '../../utils/validation.js';
 
@@ -53,26 +58,109 @@ function notFound(res, label = 'Session') {
   );
 }
 
+router.post(
+  '/bulk',
+  asyncHandler(async (req, res) => {
+    try {
+      const data = await bulkSessionActions(
+        req.tenantContext.tenantId,
+        req.body || {},
+        actorFromCtx(req.tenantContext),
+        req.tenantContext
+      );
+      res.json({ data });
+    } catch (e) {
+      if (e.status === 422) {
+        return res.status(422).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 422, detail: e.message })
+        );
+      }
+      throw e;
+    }
+  })
+);
+
 router.get(
   '/live',
   asyncHandler(async (req, res) => {
-    const { items, next_cursor } = await listLiveSessions(req.tenantContext.tenantId, {
-      cursor: req.query.next_cursor,
-      limit: req.query.limit,
-    });
-    res.json({ data: items, next_cursor });
+    try {
+      const items = await listLiveSessionsEnriched(req.tenantContext.tenantId, {
+        limit: req.query.limit,
+        exam_id: req.query.exam_id,
+      });
+      res.json({ data: items, next_cursor: null });
+    } catch {
+      const { items, next_cursor } = await listLiveSessions(req.tenantContext.tenantId, {
+        cursor: req.query.next_cursor,
+        limit: req.query.limit,
+      });
+      res.json({ data: items, next_cursor });
+    }
   })
 );
 
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { items, next_cursor } = await listSessions(req.tenantContext.tenantId, {
-      cursor: req.query.next_cursor,
-      limit: req.query.limit,
-      exam_id: req.query.exam_id,
-    });
-    res.json({ data: items, next_cursor });
+    try {
+      const { items, next_cursor, total } = await listSessionsEnriched(req.tenantContext.tenantId, {
+        cursor: req.query.next_cursor,
+        limit: req.query.limit,
+        exam_id: req.query.exam_id,
+        status: req.query.status,
+        review_status: req.query.review_status,
+        review_decision: req.query.review_decision,
+        q: req.query.q,
+        has_violations: req.query.has_violations,
+        from: req.query.from,
+        to: req.query.to,
+        sort: req.query.sort,
+        highest_severity: req.query.highest_severity,
+        min_risk: req.query.min_risk,
+      });
+      res.json({ data: items, next_cursor, total });
+    } catch {
+      const { items, next_cursor } = await listSessions(req.tenantContext.tenantId, {
+        cursor: req.query.next_cursor,
+        limit: req.query.limit,
+        exam_id: req.query.exam_id,
+      });
+      res.json({ data: items, next_cursor });
+    }
+  })
+);
+
+router.post(
+  '/:id/lockdown-events',
+  requireSebWhenStrict,
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const ok = await assertSessionBelongs(req.tenantContext.tenantId, req.params.id);
+    if (!ok) return notFound(res);
+    const result = await ingestLockdownEvents(req.tenantContext.tenantId, req.params.id, req.body || {});
+    res.status(202).json(result);
+  })
+);
+
+router.post(
+  '/:id/media/presign',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const ok = await assertSessionBelongs(req.tenantContext.tenantId, req.params.id);
+    if (!ok) return notFound(res);
+    const data = await presignMediaChunk(req.tenantContext.tenantId, req.params.id, req.body || {});
+    res.status(201).json(data);
+  })
+);
+
+router.post(
+  '/:id/media/chunk-complete',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const ok = await assertSessionBelongs(req.tenantContext.tenantId, req.params.id);
+    if (!ok) return notFound(res);
+    const data = await completeMediaChunk(req.tenantContext.tenantId, req.params.id, req.body || {});
+    res.status(201).json({ data });
   })
 );
 

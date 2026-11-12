@@ -11,7 +11,7 @@ import { MeterBar } from './MeterBar';
 const QUICK_LINKS = [
   { href: '/live', label: 'Live proctoring', desc: 'Watch active exams', icon: '▶' },
   { href: '/sessions', label: 'All sessions', desc: 'Review recordings & timeline', icon: '📋' },
-  { href: '/candidates', label: 'Candidates', desc: 'Enrolled reference photos', icon: '👤' },
+  { href: '/candidates', label: 'Candidates', desc: 'Auto-listed exam takers', icon: '👤' },
   { href: '/analytics', label: 'Deep analytics', desc: 'Violation trends & events', icon: '📊' },
 ];
 
@@ -42,7 +42,7 @@ export function UsageDashboard({ data }: { data: UsageAnalytics }) {
 
       <div className="dash-stats">
         <StatCard label="Exams" value={formatCount(t.exams)} icon="📝" hint="Configured assessments" />
-        <StatCard label="Candidates" value={formatCount(t.candidates)} icon="👥" hint="Enrolled test-takers" />
+        <StatCard label="Candidates" value={formatCount(t.candidates)} icon="👥" hint="Exam takers" />
         <StatCard
           label="Total sessions"
           value={formatCount(t.total_sessions)}

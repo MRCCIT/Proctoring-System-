@@ -63,3 +63,57 @@ export function verifySdkWsToken(token) {
   }
   return decoded;
 }
+
+export function signSdkSessionToken(payload, expiresInSeconds = 86400) {
+  return jwt.sign(
+    { typ: 'sdk_session', tid: payload.tid, sid: payload.sid },
+    config.jwtSecret,
+    { expiresIn: expiresInSeconds }
+  );
+}
+
+export function verifySdkSessionToken(token) {
+  const decoded = jwt.verify(token, config.jwtSecret);
+  if (decoded.typ !== 'sdk_session' || !decoded.tid || !decoded.sid) {
+    const e = new Error('Invalid session token');
+    e.status = 401;
+    throw e;
+  }
+  return decoded;
+}
+
+export function signLaunchToken(payload, expiresInSeconds = 3600) {
+  return jwt.sign(
+    { typ: 'launch', tid: payload.tid, sid: payload.sid },
+    config.jwtSecret,
+    { expiresIn: expiresInSeconds }
+  );
+}
+
+export function verifyLaunchToken(token) {
+  const decoded = jwt.verify(token, config.jwtSecret);
+  if (decoded.typ !== 'launch' || !decoded.tid || !decoded.sid) {
+    const e = new Error('Invalid launch token');
+    e.status = 401;
+    throw e;
+  }
+  return decoded;
+}
+
+export function signAccessLinkToken(payload, expiresInSeconds = 86400) {
+  return jwt.sign(
+    { typ: 'access_link', tid: payload.tid, lid: payload.lid },
+    config.jwtSecret,
+    { expiresIn: expiresInSeconds }
+  );
+}
+
+export function verifyAccessLinkToken(token) {
+  const decoded = jwt.verify(token, config.jwtSecret);
+  if (decoded.typ !== 'access_link' || !decoded.tid || !decoded.lid) {
+    const e = new Error('Invalid access link token');
+    e.status = 401;
+    throw e;
+  }
+  return decoded;
+}

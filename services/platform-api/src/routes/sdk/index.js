@@ -1,6 +1,15 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
+import { query } from '../../config/database.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
-import { requireSdkApiKey } from '../../middleware/sdkApiKey.js';
+import {
+  requireSdkCandidateAuth,
+  requireSdkSessionScope,
+} from '../../middleware/sdkCandidateAuth.js';
+import { requireSebWhenStrict } from '../../middleware/sebIntegrity.js';
+import { ingestLockdownEvents } from '../../services/lockdown/events.js';
+import { presignMediaChunk, completeMediaChunk } from '../../services/media/chunkPresign.js';
+import { writeBuffer, recordingKey } from '../../storage/index.js';
+import { getOrCreateExamLockdownPolicy } from '../../services/lockdown/policyStore.js';
 import { problemDetails, ProblemTypes } from '../../utils/problemDetails.js';
 import { isUuid } from '../../utils/validation.js';
 import {
@@ -25,7 +34,8 @@ import aiMonitoringRoutes from './aiMonitoring.routes.js';
 
 const router = Router();
 
-router.use(requireSdkApiKey);
+router.use(requireSdkCandidateAuth);
+router.use(requireSdkSessionScope);
 router.use('/sessions/:sessionId/ai', aiMonitoringRoutes);
 
 router.get(
@@ -39,6 +49,16 @@ router.get(
 router.post(
   '/sessions/init',
   asyncHandler(async (req, res) => {
+    if (req.sdkAuthMode === 'session') {
+      return res.status(403).type('application/problem+json').json(
+        problemDetails({
+          type: ProblemTypes.forbidden,
+          title: 'Forbidden',
+          status: 403,
+          detail: 'Session token cannot create new sessions.',
+        })
+      );
+    }
     try {
       const data = await initSdkSession(req.sdkTenantId, req.body || {});
       res.status(201).json({ data });
@@ -274,6 +294,75 @@ router.post(
     if (!ensureSessionUuid(req, res)) return;
     const row = await insertRecordingChunk(req.sdkTenantId, req.params.id, req.body || {});
     res.status(201).json({ data: row });
+  })
+);
+
+router.get(
+  '/sessions/:id/lockdown-policy',
+  asyncHandler(async (req, res) => {
+    if (!ensureSessionUuid(req, res)) return;
+    const { rows } = await query(
+      `SELECT exam_id FROM exam_sessions WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.sdkTenantId]
+    );
+    const examId = rows[0]?.exam_id;
+    if (!examId) {
+      return res.json({ data: null });
+    }
+    const signed = await getOrCreateExamLockdownPolicy(req.sdkTenantId, examId);
+    res.json({ data: signed });
+  })
+);
+
+router.post(
+  '/sessions/:id/lockdown-events',
+  requireSebWhenStrict,
+  asyncHandler(async (req, res) => {
+    if (!ensureSessionUuid(req, res)) return;
+    const result = await ingestLockdownEvents(req.sdkTenantId, req.params.id, req.body || {});
+    res.status(202).json(result);
+  })
+);
+
+router.post(
+  '/sessions/:id/media/presign',
+  requireSebWhenStrict,
+  asyncHandler(async (req, res) => {
+    if (!ensureSessionUuid(req, res)) return;
+    const data = await presignMediaChunk(req.sdkTenantId, req.params.id, req.body || {});
+    res.status(201).json(data);
+  })
+);
+
+router.post(
+  '/sessions/:id/media/chunk-complete',
+  asyncHandler(async (req, res) => {
+    if (!ensureSessionUuid(req, res)) return;
+    const data = await completeMediaChunk(req.sdkTenantId, req.params.id, req.body || {});
+    res.status(201).json({ data });
+  })
+);
+
+router.put(
+  '/sessions/:id/media/upload',
+  express.raw({ type: () => true, limit: process.env.MEDIA_UPLOAD_LIMIT || '25mb' }),
+  asyncHandler(async (req, res) => {
+    if (!ensureSessionUuid(req, res)) return;
+    const track = String(req.query.track || 'camera');
+    const index = Number(req.query.index || 0);
+    const mime = String(req.query.mime_type || 'video/webm');
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const key = req.query.object_key
+      ? String(req.query.object_key)
+      : recordingKey(req.sdkTenantId, req.params.id, track, index, ext);
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (!raw.length) {
+      return res.status(400).type('application/problem+json').json(
+        problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 400, detail: 'Empty upload body' })
+      );
+    }
+    await writeBuffer(key, raw);
+    res.status(201).json({ data: { object_key: key, bytes: raw.length } });
   })
 );
 

@@ -5,6 +5,7 @@ import { findTenantByApiKey } from '../services/tenant/tenantLookup.js';
 import { assertSessionForTenant } from '../services/sdk/candidateSessions.js';
 import { registerSessionPeer, broadcastToSession, postCandidateChatMessage } from '../services/tenant/chat.js';
 import { query } from '../config/database.js';
+import { wsOnConnect, wsOnDisconnect, wsOnFailed, wsOnHeartbeat } from './wsStats.js';
 
 async function authenticateSdkWs(request, sessionIdFromPath) {
   const host = request.headers.host || 'localhost';
@@ -57,6 +58,34 @@ async function getSessionStatus(tenantId, sessionId) {
   return rows[0] || null;
 }
 
+const candidatePeers = new Map();
+
+/** Track candidate connectivity; emits disconnect/reconnect webhooks on state transitions only. */
+async function markConnection(ctx, state) {
+  const n = (candidatePeers.get(ctx.sessionId) || 0) + (state === 'connected' ? 1 : -1);
+  if (n <= 0) candidatePeers.delete(ctx.sessionId);
+  else candidatePeers.set(ctx.sessionId, n);
+  if (state === 'disconnected' && n > 0) return;
+  try {
+    const { rows } = await query(
+      `UPDATE exam_sessions s
+       SET connection_state = $3, last_heartbeat_at = now()
+       FROM (SELECT connection_state AS prev FROM exam_sessions WHERE id = $1 AND tenant_id = $2) p
+       WHERE s.id = $1 AND s.tenant_id = $2 AND s.connection_state <> 'closed'
+         AND s.status NOT IN ('completed', 'failed', 'terminated')
+       RETURNING p.prev`,
+      [ctx.sessionId, ctx.tenantId, state]
+    );
+    const prev = rows[0]?.prev;
+    if (!prev || prev === state) return;
+    const { emitSessionWebhook } = await import('../services/sdk/candidateSessions.js');
+    if (state === 'disconnected') await emitSessionWebhook(ctx.tenantId, ctx.sessionId, 'proctoring.session.disconnected');
+    else if (prev === 'disconnected') await emitSessionWebhook(ctx.tenantId, ctx.sessionId, 'proctoring.session.reconnected');
+  } catch (e) {
+    console.warn('[ws] connection state update failed', e.message);
+  }
+}
+
 function wireClient(ws, ctx) {
   const role = ctx.role || 'candidate';
   ws.send(
@@ -77,10 +106,23 @@ function wireClient(ws, ctx) {
     },
   };
   const unsubscribe = registerSessionPeer(ctx.sessionId, peer);
+  if (role === 'candidate') void markConnection(ctx, 'connected');
+  try {
+    wsOnConnect(ctx.tenantId);
+  } catch {
+    /* ignore */
+  }
 
+  let lastBeat = 0;
   ws.on('close', () => {
     try {
       unsubscribe();
+    } catch {
+      /* ignore */
+    }
+    if (role === 'candidate') void markConnection(ctx, 'disconnected');
+    try {
+      wsOnDisconnect(ctx.tenantId);
     } catch {
       /* ignore */
     }
@@ -97,6 +139,18 @@ function wireClient(ws, ctx) {
     const op = msg.op ?? msg.type;
     if (op === 'ping') {
       ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
+      try {
+        wsOnHeartbeat(ctx.tenantId);
+      } catch {
+        /* ignore */
+      }
+      if (role === 'candidate' && Date.now() - lastBeat > 15_000) {
+        lastBeat = Date.now();
+        void query(
+          `UPDATE exam_sessions SET last_heartbeat_at = now() WHERE id = $1 AND tenant_id = $2`,
+          [ctx.sessionId, ctx.tenantId]
+        ).catch(() => {});
+      }
       return;
     }
     if (op === 'timer_tick') {
@@ -181,6 +235,11 @@ export function attachSdkWebSocket(server) {
     authenticateSdkWs(request, sessionIdFromPath)
       .then((ctx) => {
         if (!ctx) {
+          try {
+            wsOnFailed();
+          } catch {
+            /* ignore */
+          }
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;

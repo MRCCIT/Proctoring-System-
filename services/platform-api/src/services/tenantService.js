@@ -72,6 +72,16 @@ export async function getTenantById(id) {
   return mapTenantDetailRow(rows[0]);
 }
 
+const DEFAULT_FEATURE_FLAGS = {
+  ai_face_detection: true,
+  ai_audio_analysis: false,
+  gaze_detection: true,
+  phone_detection: true,
+  multiple_faces: true,
+  object_detection: true,
+  network_monitoring: true,
+};
+
 export async function createTenant(body) {
   const name = String(body.name || '').trim();
   const slug = String(body.slug || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
@@ -83,20 +93,83 @@ export async function createTenant(body) {
   const plainKey = generateApiKey();
   const keyHash = hashApiKey(plainKey);
   const prefix = plainKey.slice(0, 12);
-  const feature_flags = body.feature_flags || {};
-  const quotas = body.quotas || { max_concurrent_sessions: 100, storage_mb: 10240 };
+  const feature_flags = {
+    ...DEFAULT_FEATURE_FLAGS,
+    ...(body.feature_flags && typeof body.feature_flags === 'object' ? body.feature_flags : {}),
+  };
+  const quotasIn = body.quotas && typeof body.quotas === 'object' ? body.quotas : {};
+  const quotas = {
+    max_concurrent_sessions: Number(quotasIn.max_concurrent_sessions) > 0 ? Number(quotasIn.max_concurrent_sessions) : 100,
+    storage_mb: Number(quotasIn.storage_mb) > 0 ? Number(quotasIn.storage_mb) : 10240,
+  };
   const contact_email = body.contact_email || null;
   const contact_name = body.contact_name || null;
+  const admin_email = body.admin_email ? String(body.admin_email).trim().toLowerCase() : '';
 
   try {
     const { rows } = await query(
       `INSERT INTO tenants (name, slug, api_key_hash, api_key_prefix, contact_email, contact_name, feature_flags, quotas, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, COALESCE($9::jsonb, '{}'))
        RETURNING id`,
-      [name, slug, keyHash, prefix, contact_email, contact_name, JSON.stringify(feature_flags), JSON.stringify(quotas), body.metadata ? JSON.stringify(body.metadata) : null]
+      [
+        name,
+        slug,
+        keyHash,
+        prefix,
+        contact_email,
+        contact_name,
+        JSON.stringify(feature_flags),
+        JSON.stringify(quotas),
+        body.metadata ? JSON.stringify(body.metadata) : null,
+      ]
     );
-    const tenant = await getTenantById(rows[0].id);
-    return { tenant, api_key: plainKey };
+    const tenantId = rows[0].id;
+
+    // Starter proctoring policy templates for this org
+    try {
+      const { ensureDefaultPolicyTemplates } = await import('./tenant/policyTemplates.js');
+      await ensureDefaultPolicyTemplates(tenantId);
+    } catch (e) {
+      console.warn('[createTenant] policy seed failed:', e.message);
+    }
+
+    // Mirror AI feature flags into tenant resource policies when present
+    try {
+      const { updateTenantPolicies } = await import('./observability/policies.js');
+      await updateTenantPolicies(
+        tenantId,
+        {
+          max_concurrent_sessions: quotas.max_concurrent_sessions,
+          storage_mb: quotas.storage_mb,
+          ai_features: feature_flags,
+        },
+        { actorEmail: 'superadmin', reason: 'tenant_created' }
+      );
+    } catch (e) {
+      console.warn('[createTenant] tenant policy mirror failed:', e.message);
+    }
+
+    let admin = null;
+    let invite_url = null;
+    let invite_expires_at = null;
+    if (admin_email) {
+      try {
+        const { createPendingAdmin } = await import('./tenant/auth.js');
+        const invited = await createPendingAdmin(tenantId, {
+          email: admin_email,
+          display_name: contact_name || name,
+          role: 'admin',
+        });
+        admin = invited.admin;
+        invite_url = invited.invite_url;
+        invite_expires_at = invited.invite_expires_at;
+      } catch (e) {
+        console.warn('[createTenant] admin invite failed:', e.message);
+      }
+    }
+
+    const tenant = await getTenantById(tenantId);
+    return { tenant, api_key: plainKey, admin, invite_url, invite_expires_at };
   } catch (err) {
     if (err.code === '23505') {
       const e = new Error('slug must be unique');
@@ -142,6 +215,19 @@ export async function updateTenant(id, body) {
 export async function suspendTenant(id) {
   const { rows } = await query(
     `UPDATE tenants SET status = 'suspended', updated_at = now() WHERE id = $1 RETURNING id`,
+    [id]
+  );
+  if (!rows.length) {
+    const e = new Error('Tenant not found');
+    e.status = 404;
+    throw e;
+  }
+  return getTenantById(id);
+}
+
+export async function activateTenant(id) {
+  const { rows } = await query(
+    `UPDATE tenants SET status = 'active', updated_at = now() WHERE id = $1 RETURNING id`,
     [id]
   );
   if (!rows.length) {

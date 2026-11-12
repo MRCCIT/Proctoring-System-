@@ -54,6 +54,21 @@ router.post(
         return res.json({ data: { skipped: true, reason: 'ai_degradation_level' } });
       }
       const data = await runUnifiedProctorTick(req.sdkTenantId, sessionId, image, tickOptions);
+      try {
+        const { emitMetric } = await import('../../services/observability/aggregator.js');
+        emitMetric({
+          tenant_id: req.sdkTenantId,
+          service_name: 'ai_sidecar',
+          workload_type: 'monitor_tick',
+          operation_name: 'inference',
+          metric_name: 'ai_tick',
+          metric_value: 1,
+          metric_unit: 'count',
+          attribution: 'attributed',
+        });
+      } catch {
+        /* ignore */
+      }
       res.json({ data });
     } catch (e) {
       const status = e.status || 503;

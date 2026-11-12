@@ -1,0 +1,38 @@
+/** Default lockdown policy. Honest: a normal browser cannot be fully locked. */
+
+export const DEFAULT_LOCKDOWN_POLICY = {
+  version: 1,
+  mode: 'STANDARD',
+  requireFullscreen: true,
+  maxFullscreenExits: 3,
+  graceSeconds: 5,
+  blockCopyPasteCut: true,
+  blockContextMenu: true,
+  blockPrint: true,
+  blockDevToolsShortcuts: true,
+  blockTextSelection: false,
+  blockTabSwitch: true,
+  maxTabSwitches: 5,
+  singleSessionOnly: true,
+  multiMonitorPolicy: 'warn',
+  requireWebcam: true,
+  requireMic: false,
+  requireScreenShare: false,
+  browserIntegrity: 'none',
+  rules: {
+    fullscreenExit: { action: 'WARN', threshold: 3, severity: 'flag' },
+    tabSwitch: { action: 'WARN', threshold: 5, severity: 'flag' },
+    copyPaste: { action: 'LOG', severity: 'warn' },
+    screenShareStopped: { action: 'PAUSE_EXAM', severity: 'critical' },
+    cameraBlocked: { action: 'PAUSE_EXAM', severity: 'critical' },
+    heartbeatMissed: { action: 'WARN', threshold: 3, severity: 'warn' },
+    secondSession: { action: 'AUTO_TERMINATE', severity: 'critical' },
+    webdriver: { action: 'AUTO_TERMINATE', severity: 'critical' },
+  },
+  telemetry: {
+    heartbeatSeconds: 15,
+    batchMaxEvents: 20,
+    batchMaxMs: 5000,
+    offlineQueue: true,
+  },
+};

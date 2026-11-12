@@ -46,8 +46,13 @@ export async function getTenantsCompare() {
       t.slug,
       t.status,
       COUNT(s.id)::int AS total_sessions,
-      COUNT(s.id) FILTER (WHERE s.status = 'active')::int AS active_sessions,
+      COUNT(s.id) FILTER (WHERE s.status IN ('active','paused'))::int AS active_sessions,
       COALESCE(SUM(s.violation_flags), 0)::bigint AS violation_flags_sum,
+      COUNT(s.id) FILTER (WHERE s.review_decision = 'flagged')::int AS flagged_sessions,
+      COUNT(s.id) FILTER (
+        WHERE COALESCE(s.review_status, 'pending') <> 'reviewed'
+          AND s.status IN ('completed','terminated','failed')
+      )::int AS awaiting_review,
       COALESCE(AVG(CASE WHEN s.success IS TRUE THEN 1.0 WHEN s.success IS FALSE THEN 0.0 END), NULL)::float AS success_rate,
       COALESCE(SUM(s.storage_bytes), 0)::bigint AS storage_bytes
     FROM tenants t
@@ -60,10 +65,12 @@ export async function getTenantsCompare() {
     name: r.name,
     slug: r.slug,
     status: r.status,
-    total_sessions: r.total_sessions,
-    active_sessions: r.active_sessions,
-    violation_flags_sum: String(r.violation_flags_sum),
-    success_rate: r.success_rate,
-    storage_bytes: String(r.storage_bytes),
+    total_sessions: Number(r.total_sessions || 0),
+    active_sessions: Number(r.active_sessions || 0),
+    violation_flags_sum: String(r.violation_flags_sum ?? 0),
+    flagged_sessions: Number(r.flagged_sessions || 0),
+    awaiting_review: Number(r.awaiting_review || 0),
+    success_rate: r.success_rate == null ? null : Number(r.success_rate),
+    storage_bytes: String(r.storage_bytes ?? 0),
   }));
 }

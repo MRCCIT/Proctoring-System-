@@ -24,6 +24,16 @@ export function clearReferenceCache(sessionId) {
 /**
  * One proctor tick: Python microservices (face, gaze, phone, identity) in a single call.
  */
+async function loadSessionModules(tenantId, sessionId) {
+  const { query } = await import('../../config/database.js');
+  const { rows } = await query(
+    `SELECT ai_config FROM exam_sessions WHERE id = $1 AND tenant_id = $2`,
+    [sessionId, tenantId]
+  );
+  const modules = rows[0]?.ai_config?.ai_modules;
+  return modules && typeof modules === 'object' ? modules : {};
+}
+
 export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, options = {}) {
   const state = getSessionProctorState(sessionId);
   let reference_image = options.reference_image || null;
@@ -34,9 +44,14 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
   const tickIndex = state.tickCount;
   state.tickCount += 1;
 
+  const modules = options.modules || (await loadSessionModules(tenantId, sessionId));
+  const moduleOn = (key, fallback = true) => (key in modules ? Boolean(modules[key]) : fallback);
+
   const deepGazeEvery = parseInt(process.env.DEEP_GAZE_EVERY_N_TICKS || '2', 10) || 2;
   const deepGaze =
-    options.run_deep_gaze != null ? Boolean(options.run_deep_gaze) : tickIndex % deepGazeEvery === 0;
+    options.run_deep_gaze != null
+      ? Boolean(options.run_deep_gaze)
+      : moduleOn('gaze_tracking') && tickIndex % deepGazeEvery === 0;
 
   const payload = {
     image: imageDataUrl,
@@ -50,10 +65,11 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
     multiple_face_active: state.multipleFaceActive,
     identity_mismatch_streak: state.identityMismatchStreak,
     tick_index: tickIndex,
-    run_identity: Boolean(options.run_identity),
-    run_phone: options.run_phone !== false,
-    run_electronics: options.run_electronics === true,
+    run_identity: Boolean(options.run_identity) && moduleOn('face_detection'),
+    run_phone: options.run_phone !== false && moduleOn('object_detection'),
+    run_electronics: options.run_electronics === true && moduleOn('object_detection'),
     run_deep_gaze: deepGaze,
+    modules,
   };
 
   const analysis = await analyzeSessionFrame(payload);
@@ -70,7 +86,11 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
   const violations = analysis.violations || [];
   const shouldPersist =
     options.persist &&
-    (violations.length > 0 || tickIndex % 8 === 0 || Boolean(analysis.phone_active) || Boolean(analysis.electronics_active));
+    (violations.length > 0 ||
+      tickIndex % 8 === 0 ||
+      Boolean(analysis.phone_detected) ||
+      Boolean(analysis.phone_active) ||
+      Boolean(analysis.electronics_active));
 
   let persistence = { events: 0, face_check: false, deferred: false };
   let persist_error = null;

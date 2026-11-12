@@ -9,3 +9,7 @@ export function generateApiKey() {
 export function hashApiKey(plain) {
   return crypto.createHash('sha256').update(plain).digest('hex');
 }
+
+export function apiKeyPrefix(plain) {
+  return String(plain || '').slice(0, 12);
+}

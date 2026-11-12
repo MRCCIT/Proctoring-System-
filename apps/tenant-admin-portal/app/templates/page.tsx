@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Card, DataTable, Td } from '@proctorshield/ui-components';
+import { Card, DataTable, PageHeader, TablePagination, Td, useClientPagination } from '@proctorshield/ui-components';
 import { AuthGuard } from '@/components/AuthGuard';
 import { TenantAdminShell } from '@/components/TenantAdminShell';
 import { getClient } from '@/lib/api';
@@ -20,6 +20,17 @@ interface PolicyTemplate {
   id: string;
   name: string;
 }
+
+const MODULE_KEYS = [
+  'face_detection',
+  'multiple_faces',
+  'gaze_tracking',
+  'object_detection',
+  'audio_voice',
+  'audio_noise',
+  'keystroke',
+  'network',
+];
 
 export default function TemplatesPage() {
   const [items, setItems] = useState<SessionTemplate[]>([]);
@@ -70,11 +81,16 @@ export default function TemplatesPage() {
     await load();
   };
 
+  const pager = useClientPagination(items, 10);
+
   return (
     <AuthGuard>
       <TenantAdminShell>
-        <h1>Session templates</h1>
-        <p className="muted">Reusable session configurations for recurring exam types.</p>
+        <PageHeader
+          title="Session templates"
+          description="Reusable proctoring configurations for recurring exam types."
+          breadcrumbs={[{ label: 'Advanced' }, { label: 'Session templates' }]}
+        />
         {err && <p className="error">{err}</p>}
         <button
           type="button"
@@ -85,7 +101,7 @@ export default function TemplatesPage() {
               description: '',
               default_duration_minutes: 60,
               default_ai_sensitivity: 'normal',
-              default_ai_modules: { face_detection: true },
+              default_ai_modules: Object.fromEntries(MODULE_KEYS.map((k) => [k, k !== 'keystroke'])),
               default_policy_template_id: policies[0]?.id || null,
             })
           }
@@ -94,7 +110,7 @@ export default function TemplatesPage() {
           New session template
         </button>
         <DataTable headers={['Name', 'Duration', 'Sensitivity', 'Policy', '']}>
-          {items.map((t) => (
+          {pager.pageItems.map((t) => (
             <tr key={t.id}>
               <Td>
                 <strong>{t.name}</strong>
@@ -114,6 +130,14 @@ export default function TemplatesPage() {
             </tr>
           ))}
         </DataTable>
+        <TablePagination
+          page={pager.page}
+          pageSize={pager.pageSize}
+          total={pager.total}
+          pageCount={pager.pageCount}
+          onPageChange={pager.setPage}
+          onPageSizeChange={pager.setPageSize}
+        />
 
         {editing && (
           <div
@@ -159,6 +183,29 @@ export default function TemplatesPage() {
                     ))}
                   </select>
                 </label>
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Default AI modules</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                    {MODULE_KEYS.map((k) => (
+                      <label key={k} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(editing.default_ai_modules?.[k])}
+                          onChange={(e) =>
+                            setEditing({
+                              ...editing,
+                              default_ai_modules: {
+                                ...(editing.default_ai_modules || {}),
+                                [k]: e.target.checked,
+                              },
+                            })
+                          }
+                        />
+                        {k.replace(/_/g, ' ')}
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </Card>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
                 <button type="button" onClick={() => setEditing(null)}>

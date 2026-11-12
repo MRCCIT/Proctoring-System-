@@ -1,25 +1,51 @@
 import type { ReactNode } from 'react';
 
-export function DataTable(props: { headers: string[]; children: ReactNode }) {
+export function DataTable(props: {
+  headers: ReactNode[];
+  children: ReactNode;
+  empty?: ReactNode;
+  isEmpty?: boolean;
+  align?: Array<'left' | 'right' | 'center' | undefined>;
+}) {
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: 8 }}>
-      <thead>
-        <tr>
-          {props.headers.map((h) => (
-            <th key={h} style={{ textAlign: 'left', padding: 10, borderBottom: '2px solid #e2e8f0' }}>
-              {h}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>{props.children}</tbody>
-    </table>
+    <div className="ps-table-wrap">
+      <table className="ps-table">
+        <thead>
+          <tr>
+            {props.headers.map((h, i) => (
+              <th key={i} style={props.align?.[i] ? { textAlign: props.align[i] } : undefined}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {props.isEmpty ? (
+            <tr>
+              <td colSpan={props.headers.length} className="ps-table-empty">
+                {props.empty ?? 'Nothing to show yet.'}
+              </td>
+            </tr>
+          ) : (
+            props.children
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
-export function Td(props: { children: ReactNode; colSpan?: number }) {
+export function Td(props: {
+  children?: ReactNode;
+  colSpan?: number;
+  align?: 'left' | 'right' | 'center';
+  muted?: boolean;
+  mono?: boolean;
+  nowrap?: boolean;
+}) {
+  const cls = [props.muted && 'ps-muted', props.mono && 'ps-mono', props.nowrap && 'ps-nowrap'].filter(Boolean).join(' ');
   return (
-    <td colSpan={props.colSpan} style={{ padding: 10, borderBottom: '1px solid #e2e8f0' }}>
+    <td colSpan={props.colSpan} className={cls || undefined} style={props.align ? { textAlign: props.align } : undefined}>
       {props.children}
     </td>
   );

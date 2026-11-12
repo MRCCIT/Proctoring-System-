@@ -32,6 +32,7 @@ class ArcFaceVerifier:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model: Any = None
         self.transform = None
+        self._mp_face = None
         self._initialize_model()
 
     def _initialize_model(self) -> None:
@@ -51,6 +52,16 @@ class ArcFaceVerifier:
         except Exception:  # pragma: no cover
             logger.exception("Model initialization failed during ArcFace setup")
             self.model = None
+        try:
+            import mediapipe as mp
+
+            self._mp_face = mp.solutions.face_detection.FaceDetection(
+                model_selection=0,
+                min_detection_confidence=0.5,
+            )
+        except Exception:  # pragma: no cover
+            logger.warning("MediaPipe face crop unavailable; falling back to Haar only")
+            self._mp_face = None
 
     @property
     def available(self) -> bool:
@@ -63,20 +74,58 @@ class ArcFaceVerifier:
         tensor = self.transform(pil_image)
         return tensor.unsqueeze(0).to(self.device)
 
-    def detect_face(self, image: np.ndarray) -> np.ndarray | None:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        faces = detector.detectMultiScale(gray, 1.1, 5, minSize=(48, 48))
-        if len(faces) == 0:
-            return None
-        # Largest face = primary subject (avoids background faces in ID photos).
-        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        pad = int(0.08 * max(w, h))
+    @staticmethod
+    def _crop_with_pad(
+        image: np.ndarray, x: int, y: int, w: int, h: int, pad_ratio: float = 0.18
+    ) -> np.ndarray | None:
+        pad = int(pad_ratio * max(w, h))
         y0 = max(0, y - pad)
         x0 = max(0, x - pad)
         y1 = min(image.shape[0], y + h + pad)
         x1 = min(image.shape[1], x + w + pad)
-        return image[y0:y1, x0:x1]
+        crop = image[y0:y1, x0:x1]
+        return crop if crop.size > 0 else None
+
+    def _detect_face_mediapipe(self, image: np.ndarray) -> np.ndarray | None:
+        if self._mp_face is None:
+            return None
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        result = self._mp_face.process(rgb)
+        if not result.detections:
+            return None
+        det = max(result.detections, key=lambda d: float(d.score[0]) if d.score else 0.0)
+        bb = det.location_data.relative_bounding_box
+        ih, iw = image.shape[:2]
+        x = int(bb.xmin * iw)
+        y = int(bb.ymin * ih)
+        w = int(bb.width * iw)
+        h = int(bb.height * ih)
+        if w < 24 or h < 24:
+            return None
+        return self._crop_with_pad(image, x, y, w, h)
+
+    def _detect_face_haar(self, image: np.ndarray) -> np.ndarray | None:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        faces = detector.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
+        if len(faces) == 0:
+            return None
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        return self._crop_with_pad(image, int(x), int(y), int(w), int(h))
+
+    def detect_face(self, image: np.ndarray) -> np.ndarray | None:
+        """Crop the primary face.
+
+        MediaPipe first (robust on webcam angles), then Haar.
+        No center-crop fallback — that was inventing ~19% fake mismatches
+        when Haar missed a face MediaPipe already saw.
+        """
+        if image is None or image.size == 0:
+            return None
+        crop = self._detect_face_mediapipe(image)
+        if crop is not None:
+            return crop
+        return self._detect_face_haar(image)
 
     def extract_embedding(self, face_tensor: torch.Tensor) -> np.ndarray:
         assert self.model is not None

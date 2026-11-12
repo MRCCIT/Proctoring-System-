@@ -27,12 +27,13 @@ PHONE_DETECTOR_MODEL_PATH = os.getenv(
     "YOLO_MODEL_PATH",
     str(MODELS_DIR / "yolo11n.pt"),
 )
-PHONE_DETECTOR_CONFIDENCE = float(os.getenv("PHONE_DETECTOR_CONFIDENCE", "0.10"))
+PHONE_DETECTOR_CONFIDENCE = float(os.getenv("PHONE_DETECTOR_CONFIDENCE", "0.08"))
 PHONE_DETECTOR_IOU = float(os.getenv("PHONE_DETECTOR_IOU", "0.45"))
-PHONE_DETECTOR_IMAGE_SIZE = int(os.getenv("PHONE_DETECTOR_IMAGE_SIZE", "256"))
+# Higher imgsz catches briefly-shown / distant phones (was 256).
+PHONE_DETECTOR_IMAGE_SIZE = int(os.getenv("PHONE_DETECTOR_IMAGE_SIZE", "416"))
 PHONE_DETECTOR_FRAME_SKIP = int(os.getenv("PHONE_DETECTOR_FRAME_SKIP", "1"))
-IDENTITY_EVERY_N_TICKS = int(os.getenv("IDENTITY_EVERY_N_TICKS", "8"))
-PHONE_DETECTOR_MAX_DIM = int(os.getenv("PHONE_DETECTOR_MAX_DIM", "640"))
+IDENTITY_EVERY_N_TICKS = int(os.getenv("IDENTITY_EVERY_N_TICKS", "3"))
+PHONE_DETECTOR_MAX_DIM = int(os.getenv("PHONE_DETECTOR_MAX_DIM", "960"))
 ELECTRONICS_DETECTOR_MODEL_PATH = os.getenv(
     "ELECTRONICS_YOLO_MODEL_PATH",
     str(MODELS_DIR / "electronics_yolo.pt"),
@@ -49,7 +50,8 @@ ELECTRONICS_DETECTOR_LABEL_TOKENS = tuple(
     for token in os.getenv("ELECTRONICS_DETECTOR_LABEL_TOKENS", "tablet,ipad").split(",")
     if token.strip()
 )
-INFERENCE_MAX_WIDTH = int(os.getenv("INFERENCE_MAX_WIDTH", "480"))
+# Keep enough width so briefly-shown phones remain detectable after resize.
+INFERENCE_MAX_WIDTH = int(os.getenv("INFERENCE_MAX_WIDTH", "640"))
 DEEP_GAZE_EVERY_N_TICKS = int(os.getenv("DEEP_GAZE_EVERY_N_TICKS", "2"))
 
 LOW_LIGHT_MEAN_THRESHOLD = float(os.getenv("LOW_LIGHT_MEAN_THRESHOLD", "60.0"))

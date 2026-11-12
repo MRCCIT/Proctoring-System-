@@ -55,7 +55,7 @@ export function defaultPermissions(role) {
 
 export async function listTenantUsers(tenantId) {
   const { rows } = await query(
-    `SELECT id, email, display_name, role, permissions, created_at, updated_at
+    `SELECT id, email, display_name, role, permissions, status, invited_at, activated_at, created_at, updated_at
        FROM tenant_users
       WHERE tenant_id = $1
       ORDER BY created_at ASC`,

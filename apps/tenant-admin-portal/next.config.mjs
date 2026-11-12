@@ -13,7 +13,7 @@ const apiBase =
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ['@proctorshield/sdk'],
+  transpilePackages: ['@proctorshield/sdk', '@proctorshield/ui-components'],
   env: {
     NEXT_PUBLIC_API_URL: apiBase.replace(/\/$/, ''),
   },

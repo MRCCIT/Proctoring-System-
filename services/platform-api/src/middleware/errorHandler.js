@@ -27,6 +27,20 @@ export function notFoundHandler(req, res) {
   );
 }
 
+const STATUS_TITLES = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  409: 'Conflict',
+  410: 'Gone',
+  413: 'Payload Too Large',
+  422: 'Validation Error',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error',
+  503: 'Service Unavailable',
+};
+
 export function errorHandler(err, req, res, _next) {
   if (isDatabaseUnreachable(err)) {
     err.status = 503;
@@ -50,9 +64,7 @@ export function errorHandler(err, req, res, _next) {
   }
   const body = problemDetails({
     type,
-    title:
-      err.title ||
-      (status === 503 ? 'Service Unavailable' : status === 500 ? 'Internal Server Error' : 'Error'),
+    title: err.title || STATUS_TITLES[status] || 'Error',
     status,
     detail: err.message || undefined,
     instance: req.originalUrl,
@@ -65,6 +77,9 @@ export function errorHandler(err, req, res, _next) {
     body.detail =
       body.detail ||
       'The service cannot reach its database right now. Please try again shortly.';
+  }
+  if (status === 429 && err.retryAfter) {
+    res.setHeader('Retry-After', String(err.retryAfter));
   }
   res.status(status).type('application/problem+json').json(body);
 

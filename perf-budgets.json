@@ -1,0 +1,22 @@
+{
+  "$schema_comment": "MASTER_PROMPT Part 6 latency budgets. CI should fail on p95 regression >10% when harness exists.",
+  "unit": "ms",
+  "budgets": {
+    "exam_list_first_paint": { "p50": 100, "p95": 300, "p99": 600 },
+    "candidate_list_page_fetch": { "p50": 50, "p95": 150, "p99": 300, "notes": "cursor, 50 rows, any filter" },
+    "view_switch_client": { "p50": 16, "p95": 50 },
+    "open_candidate_detail": { "p50": 150, "p95": 400, "p99": 800 },
+    "live_status_to_proctor": { "p50": 500, "p95": 1500, "p99": 3000 },
+    "live_video_start_low_layer": { "p50": 1000, "p95": 2500, "p99": 4000 },
+    "candidate_answer_save": { "p50": 100, "p95": 250, "p99": 500, "priority": "P0" },
+    "violation_ingest_ack": { "p50": 50, "p95": 150, "p99": 300 },
+    "export_job_start_feedback": { "p50": 200 }
+  },
+  "capacity_tiers": {
+    "S": { "max_candidates": 1000 },
+    "M": { "max_candidates": 10000 },
+    "L": { "max_candidates": 50000 },
+    "XL": { "max_candidates": 100000 }
+  },
+  "load_levels": ["L0", "L1", "L2", "L3", "L4"]
+}

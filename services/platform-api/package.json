@@ -13,16 +13,22 @@
     "db:seed": "node src/db/seed.js",
     "ai:serve": "node scripts/ai-serve.mjs",
     "build": "node -e \"console.log('platform-api: no bundle')\"",
-    "lint": "node -e \"console.log('lint skipped')\""
+    "lint": "node -e \"console.log('lint skipped')\"",
+    "test": "node --test --test-concurrency=1 test/integration.test.mjs",
+    "test:unit": "node --test test/riskScore.test.mjs test/lockdownPolicy.test.mjs test/lockdownBatch.test.mjs test/capacity.test.mjs test/lanes.test.mjs test/sessionListExplain.test.mjs test/sessionQueries.test.mjs test/examAggregates.test.mjs",
+    "db:refresh-aggregates": "node scripts/refresh-aggregates.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.10.0",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "express": "^4.21.1",
     "jsonwebtoken": "^9.0.2",
+    "pdfkit": "^0.15.0",
     "pg": "^8.13.1",
     "ws": "^8.18.0"
   }

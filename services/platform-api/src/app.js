@@ -8,12 +8,24 @@ import sdkCandidateRoutes from './routes/sdk/index.js';
 import { query } from './config/database.js';
 import { probeAiHealth } from './services/ai/aiClient.js';
 import { config } from './config/index.js';
+import { httpMetricsMiddleware } from './services/observability/httpMetrics.js';
+import { register } from './infra/metrics.js';
 
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
   app.use(corsMiddleware);
   app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '20mb' }));
+  app.use(httpMetricsMiddleware);
+
+  app.get('/metrics', async (_req, res) => {
+    try {
+      res.set('Content-Type', register.contentType);
+      res.end(await register.metrics());
+    } catch (e) {
+      res.status(500).send(e.message);
+    }
+  });
 
   app.get('/health', async (_req, res) => {
     const result = {

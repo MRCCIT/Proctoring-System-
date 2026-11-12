@@ -4,6 +4,8 @@ uvicorn[standard]>=0.27.0
 numpy>=1.26.0,<2
 opencv-python-headless>=4.9.0.80
 mediapipe>=0.10.14
+# MediaPipe 0.10.x breaks on protobuf 5+/7+ (FieldDescriptor.label / GetPrototype)
+protobuf>=4.25.0,<5
 Pillow>=10.0.0
 pydantic>=2.0.0
 requests>=2.31.0

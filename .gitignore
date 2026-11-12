@@ -8,10 +8,14 @@ python/.venv*/
 
 # Generated frontend output
 apps/*/.next/
+apps/*/dist/
+**/*.tsbuildinfo
 
-# Runtime evidence (identity references remain trackable)
+# Runtime evidence / generated media
 storage/recordings/
 storage/snapshots/
+storage/exports/
+storage/identity/references/
 
 # Training datasets and generated runs
 python/data/electronics/

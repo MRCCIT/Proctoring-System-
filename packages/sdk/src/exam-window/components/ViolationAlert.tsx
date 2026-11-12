@@ -13,6 +13,10 @@ const LABELS: Record<string, string> = {
   fullscreen_exit: 'Fullscreen exited',
   multiple_displays_detected: 'Multiple displays detected',
   single_display_detected: 'External display disconnected',
+  identity_mismatch: 'Identity mismatch — face does not match enrolled photo',
+  ai_identity_mismatch: 'Identity mismatch — face does not match enrolled photo',
+  phone_detected: 'Phone detected',
+  ai_phone_visible: 'Phone detected',
   no_face_detected: 'No face detected in camera',
   multiple_faces_detected: 'Multiple faces detected',
   audio_voice_detected: 'Background voice detected',
@@ -22,8 +26,25 @@ const LABELS: Record<string, string> = {
   keystroke_long_pause: 'Unusually long pause',
 };
 
+const NOT_ALERTS = new Set(['tab_visible', 'window_focus', 'single_display_detected', 'network_online']);
+
+const PATTERN_LABELS: Array<[RegExp, string]> = [
+  [/gaze|looking_sideways/, 'Looking away from the screen'],
+  [/phone|electronics/, 'Electronic device detected'],
+  [/face/, 'Face not clearly visible'],
+];
+
+function labelFor(code: string) {
+  if (LABELS[code]) return LABELS[code];
+  const bare = code.replace(/^ai_/, '');
+  if (LABELS[bare]) return LABELS[bare];
+  for (const [re, label] of PATTERN_LABELS) if (re.test(bare)) return label;
+  return 'Unusual activity detected';
+}
+
 export function ViolationAlert(props: { violations: string[] }) {
-  if (!props.violations.length) return null;
+  const labels = [...new Set(props.violations.filter((v) => !NOT_ALERTS.has(v)).map(labelFor))];
+  if (!labels.length) return null;
   return (
     <div
       style={{
@@ -35,11 +56,12 @@ export function ViolationAlert(props: { violations: string[] }) {
         fontSize: 13,
       }}
     >
-      <strong style={{ color: '#9a3412' }}>Policy alerts</strong>
+      <strong style={{ color: '#9a3412' }}>Please follow the session rules</strong>
+      <div style={{ color: '#9a3412', marginTop: 2 }}>The following were noted and may be reviewed by your organization:</div>
       <ul style={{ marginTop: 6, marginBottom: 0, paddingLeft: 18 }}>
-        {props.violations.map((v) => (
-          <li key={v} style={{ color: '#7c2d12' }}>
-            {LABELS[v] || v}
+        {labels.map((l) => (
+          <li key={l} style={{ color: '#7c2d12' }}>
+            {l}
           </li>
         ))}
       </ul>

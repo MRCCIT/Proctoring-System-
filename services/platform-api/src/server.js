@@ -34,6 +34,12 @@ server.listen(config.port, () => {
   console.log(`Tenant Admin: http://localhost:${config.port}/v1/...`);
   console.log(`Candidate SDK:  http://localhost:${config.port}/v1/sdk/...`);
   console.log(`WebSocket SDK:  ws://localhost:${config.port}/v1/sdk/ws/sessions/{sessionId}`);
+  import('./services/exports/examExports.js')
+    .then((m) => m.resumeQueuedExports?.())
+    .catch(() => {});
+  import('./services/observability/collector.js')
+    .then((m) => m.startObservabilityCollector?.())
+    .catch((e) => console.warn('[observability] start failed', e.message));
 });
 
 function shutdown(signal) {

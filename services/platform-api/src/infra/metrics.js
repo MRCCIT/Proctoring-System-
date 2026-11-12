@@ -1,7 +1,12 @@
 import { Registry, collectDefaultMetrics, Counter, Histogram, Gauge } from 'prom-client';
 
 export const register = new Registry();
-collectDefaultMetrics({ register });
+
+try {
+  collectDefaultMetrics({ register });
+} catch (e) {
+  console.warn('[metrics] default metrics disabled:', e.message);
+}
 
 export const httpRequestDuration = new Histogram({
   name: 'proctorshield_http_request_duration_seconds',

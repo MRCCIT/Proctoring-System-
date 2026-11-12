@@ -48,7 +48,12 @@ export function ExamFrame(props: {
   return (
     <section>
       <ProctoringTimer startedAt={Date.now()} />
-      <ProctoringIndicator active sessionId={props.sessionId} />
+      <ProctoringIndicator
+        recording
+        online
+        sessionId={props.sessionId}
+        violations={violations.length}
+      />
       <ViolationAlert violations={violations} />
       <video ref={videoRef} autoPlay muted playsInline style={{ width: 160, position: 'fixed', bottom: 16, right: 16 }} />
       {props.examUrl ? (

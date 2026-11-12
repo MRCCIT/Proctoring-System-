@@ -9,6 +9,11 @@ export interface ChunkedRecorderOptions {
   track: RecordingTrack;
   /** Mime preference list, first supported is used */
   mimeTypes?: string[];
+  /**
+   * Target bitrate for MediaRecorder (bits/sec). Lower = smaller uploads.
+   * Defaults: camera ~900kbps, screen ~1.2Mbps when unset by caller.
+   */
+  bitsPerSecond?: number;
   /** Called when the next chunk is ready – usually upload to object storage */
   onChunk?: (info: { blob: Blob; sequence: number; track: RecordingTrack; startedAt: string; endedAt: string }) => void | Promise<void>;
 }
@@ -42,7 +47,15 @@ export class ChunkedRecorder {
     const chunkMs = this.opts.chunkMs ?? 10_000;
     const mime = pickMime(this.opts.mimeTypes ?? DEFAULT_MIMES);
     this.mimeType = mime || 'video/webm';
-    this.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    const defaultBps = this.opts.track === 'screen' ? 1_200_000 : 900_000;
+    const bitsPerSecond = this.opts.bitsPerSecond ?? defaultBps;
+    const recOpts: MediaRecorderOptions = mime ? { mimeType: mime, bitsPerSecond } : { bitsPerSecond };
+    try {
+      this.recorder = new MediaRecorder(stream, recOpts);
+    } catch {
+      // Some browsers reject bitsPerSecond with certain codecs — fall back to mime-only.
+      this.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    }
     this.currentChunkStart = Date.now();
     this.recorder.ondataavailable = async (e) => {
       if (!e.data.size) return;
@@ -124,7 +137,7 @@ async function blobToBase64(blob: Blob): Promise<string> {
   for (let i = 0; i < bytes.length; i += chunk) {
     binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
   }
-  return typeof btoa === 'function' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
+  return btoa(binary);
 }
 
 export function buildChunkSignaler(

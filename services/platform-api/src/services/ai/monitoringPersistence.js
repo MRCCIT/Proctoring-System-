@@ -1,6 +1,8 @@
 import { query } from '../../config/database.js';
 import { assertSessionForTenant } from '../sdk/candidateSessions.js';
 import { insertSnapshotEvidence, stripDataUrl } from '../tenant/recording.js';
+import { describeEvent, shouldRecordAiEvent } from '../events/violationCatalog.js';
+import { emitWebhookEvent } from '../webhooks/dispatcher.js';
 
 function mapViolationToEvent(v) {
   const severity = v.includes('phone') ? 'flag' : 'warn';
@@ -60,23 +62,38 @@ export async function persistUnifiedProctorTick(tenantId, sessionId, analysis, i
   for (const v of violations) {
     if (!shouldEmit(sessionId, v)) continue;
     const ev = mapViolationToEvent(v);
-    await query(
-      `INSERT INTO session_events (tenant_id, session_id, event_type, severity, payload, occurred_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, now())`,
+    if (!shouldRecordAiEvent(sessionId, ev.event_type)) continue;
+    const meta = describeEvent(ev.event_type, ev.severity);
+    const { rows: ins } = await query(
+      `INSERT INTO session_events (tenant_id, session_id, event_type, severity, payload, occurred_at, source)
+       VALUES ($1, $2, $3, $4, $5::jsonb, now(), 'ai')
+       RETURNING id, occurred_at`,
       [
         tenantId,
         sessionId,
         ev.event_type,
-        ev.severity,
+        meta.severity,
         JSON.stringify({
           source: 'unified_tick',
           gaze_direction: analysis.gaze_direction,
           gaze_score: analysis.gaze_score,
           phone_detected: analysis.phone_detected,
+          identity_score: analysis.identity_score ?? null,
+          face_count: analysis.face_count ?? null,
         }),
       ]
     );
     events += 1;
+    void emitWebhookEvent(tenantId, 'proctoring.violation.detected', {
+      session_id: sessionId,
+      event_id: String(ins[0].id),
+      code: meta.code,
+      label: meta.label,
+      category: meta.category,
+      severity: meta.severity,
+      source: 'ai',
+      occurred_at: ins[0].occurred_at,
+    });
   }
 
   const violsForFace = violations.filter((x) => typeof x === 'string');

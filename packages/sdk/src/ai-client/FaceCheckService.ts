@@ -53,6 +53,8 @@ export interface FaceCheckServiceOptions {
   persistServerAi?: boolean;
   referenceImage?: string | null;
   identityThreshold?: number;
+  /** Effective policy modules from session config; disabled modules skip related detection. */
+  modules?: Record<string, boolean> | null;
 }
 
 type Resolved = Required<
@@ -65,6 +67,7 @@ type Resolved = Required<
     | 'onServerError'
     | 'getStream'
     | 'referenceImage'
+    | 'modules'
   >
 > & {
   onResult: (r: FaceCheckResult) => void;
@@ -74,6 +77,7 @@ type Resolved = Required<
   onServerError: (message: string) => void;
   getStream: () => MediaStream | null;
   referenceImage: string | null;
+  modules: Record<string, boolean>;
 };
 
 export class FaceCheckService {
@@ -105,7 +109,7 @@ export class FaceCheckService {
       onResult: opts.onResult ?? (() => {}),
       getStream: opts.getStream ?? (() => null),
       serverAi: opts.serverAi ?? false,
-      analyzeMinIntervalMs: opts.analyzeMinIntervalMs ?? 500,
+      analyzeMinIntervalMs: opts.analyzeMinIntervalMs ?? 150,
       phoneCheckMinIntervalMs: opts.phoneCheckMinIntervalMs ?? 1_000,
       serverHeartbeatEvery: opts.serverHeartbeatEvery ?? 3,
       onServerAnalysis: opts.onServerAnalysis ?? (() => {}),
@@ -115,6 +119,7 @@ export class FaceCheckService {
       persistServerAi: opts.persistServerAi ?? true,
       referenceImage: opts.referenceImage ?? null,
       identityThreshold: opts.identityThreshold ?? DEFAULT_IDENTITY_MIN_SIMILARITY,
+      modules: opts.modules || {},
     };
     this.monitorThrottle = new AiSidecarThrottle({
       minIntervalMs: 0,
@@ -165,6 +170,29 @@ export class FaceCheckService {
     this.opts.referenceImage = dataUrl;
   }
 
+  setModules(modules: Record<string, boolean> | null | undefined) {
+    this.opts.modules = modules || {};
+  }
+
+  private moduleOn(key: string, fallback = true) {
+    const m = this.opts.modules || {};
+    if (!(key in m)) return fallback;
+    return Boolean(m[key]);
+  }
+
+  private filterViolations(list: string[]) {
+    return list.filter((v) => {
+      if (v === 'no_face_detected' || v === 'multiple_faces_detected') {
+        if (v === 'multiple_faces_detected') return this.moduleOn('multiple_faces');
+        return this.moduleOn('face_detection');
+      }
+      if (v.includes('gaze') || v.startsWith('gaze_')) return this.moduleOn('gaze_tracking');
+      if (v.includes('phone') || v.includes('electronics')) return this.moduleOn('object_detection');
+      if (v.includes('identity')) return this.moduleOn('face_detection');
+      return true;
+    });
+  }
+
   private async captureFrame(): Promise<string | null> {
     const stream = this.opts.getStream();
     const video = this.currentVideo;
@@ -203,7 +231,7 @@ export class FaceCheckService {
           if (!this.opts.serverAi && this.localMultiFaceStreak >= 2) {
             violations.push('multiple_faces_detected');
           }
-          const result: FaceCheckResult = { ...res, violations };
+          const result: FaceCheckResult = { ...res, violations: this.filterViolations(violations) };
           this.enqueueLocal(result);
           if (this.opts.serverAi && violations.includes('no_face_detected')) {
             void this.runServerAi('suspicious');
@@ -273,6 +301,14 @@ export class FaceCheckService {
 
   private async runServerAi(_reason: 'heartbeat' | 'suspicious') {
     if (!this.opts.serverAi || !this.running) return;
+    if (
+      !this.moduleOn('face_detection') &&
+      !this.moduleOn('gaze_tracking') &&
+      !this.moduleOn('object_detection') &&
+      !this.moduleOn('multiple_faces')
+    ) {
+      return;
+    }
     if (this.serverTickInFlight) {
       this.serverCatchUp = true;
       return;
@@ -321,13 +357,21 @@ export class FaceCheckService {
         return;
       }
 
-      this.opts.onServerAnalysis(analysis);
-      this.opts.onServerTick({
+      const filtered: ServerAiAnalysis = {
         ...analysis,
+        violations: this.filterViolations(analysis.violations || []),
+        phone_detected: this.moduleOn('object_detection') ? analysis.phone_detected : false,
+        electronics_detected: this.moduleOn('object_detection') ? analysis.electronics_detected : false,
+        gaze_direction: this.moduleOn('gaze_tracking') ? analysis.gaze_direction : 'center',
+      };
+
+      this.opts.onServerAnalysis(filtered);
+      this.opts.onServerTick({
+        ...filtered,
         ok: true,
       });
       this.opts.onServerPhoneCheck({
-        phone_detected: Boolean(analysis.phone_detected),
+        phone_detected: Boolean(filtered.phone_detected),
         yolo_enabled: Boolean((analysis as { phone_yolo_enabled?: boolean }).phone_yolo_enabled),
       });
     } catch (e) {

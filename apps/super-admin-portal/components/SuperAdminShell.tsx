@@ -1,8 +1,9 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { AppShell } from '@proctorshield/ui-components';
-import { superAdminTokens } from '@/lib/api';
+import { getClient, loadProfile, saveProfile, signOut, type SuperProfile } from '@/lib/api';
 
 const LINKS = [
   { href: '/dashboard', label: 'Dashboard' },
@@ -15,12 +16,48 @@ const LINKS = [
 
 export function SuperAdminShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const [profile, setProfile] = useState<SuperProfile | null>(null);
+
+  useEffect(() => {
+    setProfile(loadProfile());
+    let alive = true;
+    getClient()
+      .superadminMe()
+      .then((res) => {
+        if (!alive) return;
+        const next: SuperProfile = {
+          email: res.data.email,
+          name: res.data.display_name || res.data.email,
+        };
+        saveProfile(next);
+        setProfile(next);
+      })
+      .catch(() => {
+        /* keep cached profile */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   return (
     <AppShell
       title="ProctorShield Super Admin"
+      subtitle="Platform console"
       links={LINKS}
+      pathname={pathname || undefined}
+      user={
+        profile
+          ? {
+              name: profile.name || profile.email || 'Super admin',
+              email: profile.email,
+              org: 'Super admin',
+            }
+          : null
+      }
       onLogout={() => {
-        superAdminTokens.clear();
+        signOut();
         router.push('/login');
       }}
     >

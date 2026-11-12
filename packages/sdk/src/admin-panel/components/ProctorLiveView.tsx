@@ -10,6 +10,7 @@ import {
   parseViolationCaption,
   sessionStatusTone,
 } from './proctorLiveHelpers';
+import { pickPlayerTier } from '../playerTier';
 
 export interface ProctorLiveViewProps {
   client: ProctorShieldClient;
@@ -79,8 +80,19 @@ export function ProctorLiveView(props: ProctorLiveViewProps) {
 
   const [hdr, setHdr] = useState<{ exam?: string; candidateName?: string; candidateEmail?: string }>({});
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loadLevel, setLoadLevel] = useState<string>('L0');
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const [liveConnected, setLiveConnected] = useState(false);
+  const playbackTier = useMemo(
+    () =>
+      pickPlayerTier({
+        watchingLive: liveConnected,
+        snapshotUrl: previewUrl,
+        loadLevel,
+        focused: true,
+      }),
+    [previewUrl, loadLevel, liveConnected]
+  );
   const [violationThumbs, setViolationThumbs] = useState<
     Array<{ id: string; url: string; caption: string; captured_at?: string }>
   >([]);
@@ -387,6 +399,9 @@ export function ProctorLiveView(props: ProctorLiveViewProps) {
                 <IconVideo />
                 Live feed
               </h3>
+              <span className="proctor-inline-muted" style={{ fontSize: 11 }}>
+                Tier: {playbackTier.tier.replace(/_/g, ' ')}
+              </span>
               {liveConnected && (
                 <span className="proctor-live-badge">
                   <span className="proctor-live-dot" />

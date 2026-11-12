@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from proctoring.runtime_metrics import METRICS, track_request
 from proctoring.config import (
     PHONE_DETECTOR_CONFIDENCE,
     PHONE_DETECTOR_FRAME_SKIP,
@@ -130,6 +131,10 @@ class AnalyzeSessionPayload(BaseModel):
         None,
         description="Use RetinaNet gaze; when omitted, alternates by tick_index for speed",
     )
+    modules: dict[str, bool] | None = Field(
+        None,
+        description="Optional policy modules; disabled detectors are no-ops / filtered",
+    )
 
 
 def _preload_models() -> None:
@@ -152,25 +157,71 @@ def _startup_preload() -> None:
     threading.Thread(target=_preload_models, name="ai-preload", daemon=True).start()
 
 
-@app.get("/health")
-def health() -> dict:
+def _model_status() -> dict:
+    arc = None
+    try:
+        arc = get_arcface_verifier()
+    except Exception:
+        arc = None
+    phone = _phone_detector
+    electronics = _electronics_detector
     return {
-        "status": "ok",
-        "service": "proctorshield-ai",
+        "ready": _models_ready,
+        "analyzer_loaded": _analyzer is not None,
+        "session_analyzer_loaded": _session_analyzer is not None,
+        "phone_detector": {
+            "loaded": phone is not None,
+            "enabled": bool(getattr(phone, "enabled", False)) if phone else False,
+            "model_path": PHONE_DETECTOR_MODEL_PATH,
+        },
+        "electronics_detector": {
+            "loaded": electronics is not None,
+            "enabled": bool(getattr(electronics, "enabled", False)) if electronics else False,
+            "model_path": ELECTRONICS_DETECTOR_MODEL_PATH,
+        },
+        "arcface": {
+            "available": bool(getattr(arc, "available", False)) if arc else False,
+        },
         "yolo_model": PHONE_DETECTOR_MODEL_PATH,
         "electronics_yolo_model": ELECTRONICS_DETECTOR_MODEL_PATH,
-        "models_ready": _models_ready,
     }
+
+
+@app.get("/health")
+def health() -> dict:
+    snap = METRICS.snapshot(models=_model_status())
+    # Keep legacy fields for older probes while exposing full capacity data.
+    return {
+        **snap,
+        "status": "ok" if snap["status"] in ("healthy", "degraded") else snap["status"],
+        "health": snap["status"],
+        "models_ready": _models_ready,
+        "yolo_model": PHONE_DETECTOR_MODEL_PATH,
+        "electronics_yolo_model": ELECTRONICS_DETECTOR_MODEL_PATH,
+    }
+
+
+@app.get("/metrics")
+def metrics() -> dict:
+    return METRICS.snapshot(models=_model_status())
 
 
 @app.post("/internal/analyze-session")
 def analyze_session(body: AnalyzeSessionPayload) -> dict:
     """
-    Single-call proctoring tick (~1 Hz from Node): face, gaze, phone, optional identity.
+    Single-call proctoring tick (~6–7 Hz from Node): face, gaze, phone, optional identity.
     Mirrors reference backend /analyze_frame aggregation.
     """
     import time
 
+    try:
+        with track_request("analyze-session"):
+            return _analyze_session_inner(body)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": "1"}) from e
+
+
+def _analyze_session_inner(body: AnalyzeSessionPayload) -> dict:
     t0 = time.perf_counter()
     try:
         frame = decode_payload_frame(body.model_dump(), key="image")
@@ -189,20 +240,34 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
     else:
         deep_gaze = bool(body.run_deep_gaze)
 
+    modules = body.modules or {}
+
+    def module_on(key: str, default: bool = True) -> bool:
+        if key not in modules:
+            return default
+        return bool(modules[key])
+
+    run_phone = bool(body.run_phone) and module_on("object_detection")
+    run_electronics = bool(body.run_electronics) and module_on("object_detection")
+    deep_gaze = deep_gaze and module_on("gaze_tracking")
+
     sa = get_session_analyzer()
     core = sa.analyze_frame_core(
         frame,
-        run_phone=bool(body.run_phone),
-        run_electronics=bool(body.run_electronics),
+        run_phone=run_phone,
+        run_electronics=run_electronics,
         deep_gaze=deep_gaze,
     )
     violations = [item for item in core["violations"] if item != "multiple_faces_detected"]
-    multiple_face_flagged, multiple_face_streak, multiple_face_active = sa.apply_multiple_face_streak(
-        int(core["face_count"]),
-        int(body.multiple_face_streak or 0),
-        bool(body.multiple_face_active),
-    )
-    violations.extend(multiple_face_flagged)
+    if module_on("multiple_faces"):
+        multiple_face_flagged, multiple_face_streak, multiple_face_active = sa.apply_multiple_face_streak(
+            int(core["face_count"]),
+            int(body.multiple_face_streak or 0),
+            bool(body.multiple_face_active),
+        )
+        violations.extend(multiple_face_flagged)
+    else:
+        multiple_face_flagged, multiple_face_streak, multiple_face_active = [], int(body.multiple_face_streak or 0), bool(body.multiple_face_active)
 
     phone_flagged, phone_streak, phone_active = sa.apply_phone_streak(
         bool(core["phone_detected"]),
@@ -236,8 +301,9 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
         run_id = int(body.tick_index or 0) % max(1, IDENTITY_EVERY_N_TICKS) == 0
 
     if run_id and body.reference_image and int(core["face_count"]) == 1:
+        # Skip compare under bad pose/light, but keep streak (do not wipe progress).
         if "looking_sideways" in violations or "low_lighting" in violations:
-            identity_mismatch_streak = 0
+            pass
         else:
             try:
                 v = get_arcface_verifier()
@@ -246,16 +312,26 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
                     live = frame
                     out = v.verify_faces(ref, live)
                     identity_score = float(out.get("similarity", 0))
-                    identity_match = bool(out.get("verified"))
-                    if identity_score < min_similarity:
-                        identity_match = False
-                    if identity_match:
-                        identity_mismatch_streak = 0
+                    # <35% on same-person paths almost always means a bad crop /
+                    # non-face compare (old Haar center-fallback ~19%). Skip streak.
+                    if identity_score < 35.0:
+                        log.warning(
+                            "identity score %.1f%% looks like a bad crop; skipping mismatch streak",
+                            identity_score,
+                        )
+                        identity_match = None
                     else:
-                        identity_mismatch_streak += 1
+                        identity_match = bool(out.get("verified"))
+                        if identity_score < min_similarity:
+                            identity_match = False
+                        if identity_match:
+                            identity_mismatch_streak = 0
+                        else:
+                            identity_mismatch_streak += 1
                 else:
                     identity_match = None
-            except Exception:
+            except Exception as exc:
+                log.warning("identity compare skipped: %s", exc)
                 identity_match = None
 
     from proctoring.config import LIVE_IDENTITY_MISMATCH_STREAK_THRESHOLD as _id_streak
@@ -287,43 +363,55 @@ def analyze_session(body: AnalyzeSessionPayload) -> dict:
 @app.post("/internal/analyze-frame")
 def analyze_frame(body: ImagePayload) -> dict:
     try:
-        frame = decode_payload_frame(body.model_dump(), key="image")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    result = get_analyzer().analyze(frame)
-    return {
-        "face_count": result.face_count,
-        "sideways_score": result.sideways_score,
-        "violations": result.violations,
-        "gaze_direction": result.gaze_direction,
-        "gaze_score": result.gaze_score,
-        "gaze_detector": result.gaze_detector,
-    }
+        with track_request("analyze-frame"):
+            try:
+                frame = decode_payload_frame(body.model_dump(), key="image")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            result = get_analyzer().analyze(frame)
+            return {
+                "face_count": result.face_count,
+                "sideways_score": result.sideways_score,
+                "violations": result.violations,
+                "gaze_direction": result.gaze_direction,
+                "gaze_score": result.gaze_score,
+                "gaze_detector": result.gaze_detector,
+            }
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": "1"}) from e
 
 
 @app.post("/internal/phone-detect")
 def phone_detect(body: ImagePayload) -> dict:
     try:
-        frame = decode_payload_frame(body.model_dump(), key="image")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    pd = get_phone_detector()
-    detected = pd.detect_phone(frame)
-    return {"phone_detected": detected, "yolo_enabled": pd.enabled}
+        with track_request("phone-detect"):
+            try:
+                frame = decode_payload_frame(body.model_dump(), key="image")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            pd = get_phone_detector()
+            detected = pd.detect_phone(frame)
+            return {"phone_detected": detected, "yolo_enabled": pd.enabled}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": "1"}) from e
 
 
 @app.post("/internal/electronics-detect")
 def electronics_detect(body: ImagePayload) -> dict:
     try:
-        frame = decode_payload_frame(body.model_dump(), key="image")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    result = get_electronics_detector().detect_electronics(frame)
-    return {
-        "electronics_detected": result["detected"],
-        "electronics_labels": result["labels"],
-        "yolo_enabled": get_electronics_detector().enabled,
-    }
+        with track_request("electronics-detect"):
+            try:
+                frame = decode_payload_frame(body.model_dump(), key="image")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            result = get_electronics_detector().detect_electronics(frame)
+            return {
+                "electronics_detected": result["detected"],
+                "electronics_labels": result["labels"],
+                "yolo_enabled": get_electronics_detector().enabled,
+            }
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": "1"}) from e
 
 
 def _resolve_min_similarity(threshold: float | None) -> float:
@@ -335,6 +423,14 @@ def _resolve_min_similarity(threshold: float | None) -> float:
 
 @app.post("/internal/face-compare")
 def face_compare(body: FaceComparePayload) -> dict:
+    try:
+        with track_request("face-compare"):
+            return _face_compare_inner(body)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": "1"}) from e
+
+
+def _face_compare_inner(body: FaceComparePayload) -> dict:
     min_sim = _resolve_min_similarity(body.identity_threshold)
     try:
         if body.profile_url and body.live_url:
