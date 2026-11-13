@@ -1,11 +1,12 @@
 import { query } from '../../config/database.js';
 import { canonicalCode, describeEvent, violationSqlPredicate } from '../events/violationCatalog.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 export async function getTenantUsageAnalytics(tenantId) {
   const { rows: s } = await query(
     `SELECT
        COUNT(*)::int AS total_sessions,
-       COUNT(*) FILTER (WHERE status IN ('active','paused'))::int AS active_sessions,
+       COUNT(*) FILTER (WHERE ${livePresenceSql('')})::int AS active_sessions,
        COUNT(*) FILTER (WHERE created_at > now() - interval '7 days')::int AS sessions_last_7d,
        COUNT(*) FILTER (WHERE created_at > now() - interval '30 days')::int AS sessions_last_30d,
        COALESCE(SUM(storage_bytes), 0)::bigint AS storage_bytes,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -433,22 +434,29 @@ def face_compare(body: FaceComparePayload) -> dict:
 def _face_compare_inner(body: FaceComparePayload) -> dict:
     min_sim = _resolve_min_similarity(body.identity_threshold)
     try:
-        if body.profile_url and body.live_url:
-            v = get_arcface_verifier()
-            if not v.available:
-                raise HTTPException(status_code=501, detail="ArcFace (facenet_pytorch) not available")
+        v = get_arcface_verifier()
+        if not v.available:
+            raise HTTPException(status_code=501, detail="ArcFace (facenet_pytorch) not available")
+
+        img1 = None
+        img2 = None
+        if body.profile_url:
             img1 = load_image_from_url(body.profile_url)
-            img2 = load_image_from_url(body.live_url)
-            return v.verify_faces(img1, img2, min_similarity_percent=min_sim)
-        if body.reference_image and body.live_image:
-            v = get_arcface_verifier()
-            if not v.available:
-                raise HTTPException(status_code=501, detail="ArcFace (facenet_pytorch) not available")
+        elif body.reference_image:
             try:
                 img1 = decode_data_url_image(body.reference_image)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+
+        if body.live_url:
+            img2 = load_image_from_url(body.live_url)
+        elif body.live_image:
+            try:
                 img2 = decode_data_url_image(body.live_image)
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
+
+        if img1 is not None and img2 is not None:
             return v.verify_faces(img1, img2, min_similarity_percent=min_sim)
     except HTTPException:
         raise
@@ -458,7 +466,7 @@ def _face_compare_inner(body: FaceComparePayload) -> dict:
         raise HTTPException(status_code=500, detail=str(e)) from e
     raise HTTPException(
         status_code=422,
-        detail="Provide profile_url+live_url OR reference_image+live_image (data URLs or base64)",
+        detail="Provide reference (profile_url or reference_image) AND live (live_url or live_image)",
     )
 
 

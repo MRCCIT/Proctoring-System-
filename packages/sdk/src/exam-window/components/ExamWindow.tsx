@@ -11,7 +11,7 @@ import { IdentityCheckService } from '../../ai-client/IdentityCheckService';
 import { AudioAnalyzer } from '../../ai-client/AudioAnalyzer';
 import { LockdownEnforcer, ViolationReason } from '../../lockdown/LockdownEnforcer';
 import { LockdownClient, createFetchTransport } from '../../lockdown/client';
-import type { LockdownPolicy, SignedLockdownPolicy } from '../../lockdown/policy';
+import { DEFAULT_LOCKDOWN_POLICY, type LockdownPolicy, type SignedLockdownPolicy } from '../../lockdown/policy';
 import { snapshotIntervalMs } from '../../capacity/levelPolicy';
 import { NetworkMonitor } from '../../lockdown/NetworkMonitor';
 import { KeystrokeAnalyzer } from '../../lockdown/KeystrokeAnalyzer';
@@ -22,6 +22,7 @@ import { IdentityVerification } from './IdentityVerification';
 import { FloatingCameraWindow } from './FloatingCameraWindow';
 import { ProctoringIndicator } from './ProctoringIndicator';
 import { ProctorChatPanel } from './ProctorChatPanel';
+import { SessionControlOverlay, type SessionControlKind } from './SessionControlOverlay';
 import { ViolationAlert } from './ViolationAlert';
 
 type Step = 'permissions' | 'system-check' | 'identity' | 'exam' | 'submitted';
@@ -146,6 +147,7 @@ export function ExamWindow(props: ExamWindowProps) {
   const [violations, setViolations] = useState<string[]>([]);
   const [recording, setRecording] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [controlModal, setControlModal] = useState<{ kind: SessionControlKind; message: string } | null>(null);
   const [online, setOnline] = useState(true);
   const [chatCollapsed, setChatCollapsed] = useState(true);
   const [camCollapsed, setCamCollapsed] = useState(false);
@@ -205,18 +207,20 @@ export function ExamWindow(props: ExamWindowProps) {
 
       const now = Date.now();
       const cooldownMs =
-        reason === 'audio_voice_detected'
-          ? 25_000
-          : reason.startsWith('keystroke_')
-            ? 14_000
-            : reason.startsWith('network_')
-              ? 35_000
-              : reason.startsWith('ai_') ||
-                  reason.startsWith('gaze_') ||
-                  reason === 'phone_detected' ||
-                  reason === 'identity_mismatch'
-                ? 4_000
-                : 12_000;
+        reason === 'audio_voice_detected' || reason === 'audio_noise_detected'
+          ? 18_000
+          : reason === 'visibility_hidden' || reason === 'screen_share_ended'
+            ? 8_000
+            : reason.startsWith('keystroke_')
+              ? 14_000
+              : reason.startsWith('network_')
+                ? 35_000
+                : reason.startsWith('ai_') ||
+                    reason.startsWith('gaze_') ||
+                    reason === 'phone_detected' ||
+                    reason === 'identity_mismatch'
+                  ? 4_000
+                  : 12_000;
 
       const last = lastViolationEmitRef.current.get(reason) ?? 0;
       if (now - last < cooldownMs) return;
@@ -295,7 +299,24 @@ export function ExamWindow(props: ExamWindowProps) {
     } catch {
       policyRef.current = null;
     }
-    if (!identityReferenceImage && !identityReferenceUrl) {
+    if (identityReferenceImage) {
+      setEnrolledReference(identityReferenceImage);
+    } else if (identityReferenceUrl) {
+      // Prefetch HTTP reference into a data URL so continuous identity can run during the exam.
+      try {
+        const res = await fetch(identityReferenceUrl);
+        const blob = await res.blob();
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(String(fr.result));
+          fr.onerror = () => reject(fr.error);
+          fr.readAsDataURL(blob);
+        });
+        setEnrolledReference(dataUrl);
+      } catch {
+        /* keep going — IdentityVerification can still use referenceUrl */
+      }
+    } else {
       try {
         const ref = await client.getIdentityReference(data.session_id);
         if (ref.data?.enrolled && ref.data?.data_url) {
@@ -326,13 +347,28 @@ export function ExamWindow(props: ExamWindowProps) {
       chatRef.current.connect();
       chatRef.current.on((msg) => {
         const t = (msg as { type?: string }).type;
-        if (t === 'session_paused') setPaused(true);
-        if (t === 'session_resumed') setPaused(false);
+        const text = typeof (msg as { message?: string }).message === 'string' ? (msg as { message: string }).message : '';
+        if (t === 'session_paused') {
+          setPaused(true);
+          setControlModal({
+            kind: 'paused',
+            message: text || 'Your proctor has paused this exam. Please wait until it is resumed.',
+          });
+        }
+        if (t === 'session_resumed') {
+          setPaused(false);
+          setControlModal({
+            kind: 'resumed',
+            message: text || 'Your proctor has resumed the exam. You may continue.',
+          });
+        }
         if (t === 'session_terminated') {
           setPaused(false);
           setRecording(false);
-          setStep('submitted');
-          onSessionEnd?.(sid);
+          setControlModal({
+            kind: 'terminated',
+            message: text || 'Your proctor has terminated this exam session.',
+          });
         }
         if (t === 'load_level') {
           const lv = (msg as { level?: string }).level;
@@ -359,31 +395,26 @@ export function ExamWindow(props: ExamWindowProps) {
         .then((r) => r.data)
         .catch(() => null);
 
-      const lockPolicy: LockdownPolicy =
+      const remoteLock =
         signedPolicy?.policy ||
         ((await client.getSessionConfig(sid).catch(() => null))?.data as { lockdown_policy?: { policy: LockdownPolicy } })
-          ?.lockdown_policy?.policy || {
-          version: 1,
-          mode: 'STANDARD',
-          blockCopyPasteCut: true,
-          blockContextMenu: true,
-          blockPrint: false,
-          blockDevToolsShortcuts: false,
-          blockTextSelection: false,
-          blockTabSwitch: true,
-          singleSessionOnly: true,
-          requireFullscreen: false,
-          maxFullscreenExits: 3,
-          graceSeconds: 5,
-          maxTabSwitches: 5,
-          multiMonitorPolicy: 'warn',
-          requireWebcam: true,
-          requireMic: false,
-          requireScreenShare: false,
-          browserIntegrity: 'none',
-          rules: {},
-          telemetry: { heartbeatSeconds: 15, batchMaxEvents: 20, batchMaxMs: 5000, offlineQueue: true },
-        };
+          ?.lockdown_policy?.policy ||
+        null;
+      // Always keep DEFAULT rules — empty rules:{} meant tab-switch etc. never called addViolation
+      // so Live "Violation captures" stayed at 0 even when the candidate misbehaved.
+      const lockPolicy: LockdownPolicy = {
+        ...DEFAULT_LOCKDOWN_POLICY,
+        ...(remoteLock || {}),
+        requireFullscreen: remoteLock?.requireFullscreen ?? false,
+        rules: {
+          ...DEFAULT_LOCKDOWN_POLICY.rules,
+          ...(remoteLock?.rules || {}),
+        },
+        telemetry: {
+          ...DEFAULT_LOCKDOWN_POLICY.telemetry,
+          ...(remoteLock?.telemetry || {}),
+        },
+      };
 
       const sessionAuthToken = presetToken || token || client.options.sessionToken || null;
       lockdownClientRef.current = new LockdownClient({
@@ -444,14 +475,33 @@ export function ExamWindow(props: ExamWindowProps) {
         if (moduleOn('audio_voice') || moduleOn('audio_noise')) {
           audioRef.current = new AudioAnalyzer();
           audioRef.current.on((r) => {
-            if (moduleOn('audio_voice') && r.voice_detected && r.level > 0.32) {
+            if (moduleOn('audio_voice') && r.voice_detected && r.level > 0.22) {
               addViolation('audio_voice_detected');
             }
+            // Loud non-voice / ambient noise (clapping, music, fan spike, etc.)
+            if (moduleOn('audio_noise') && r.noise > 0.28 && r.level > 0.18) {
+              addViolation('audio_noise_detected');
+            }
           });
-          audioRef.current.start(camMicStream, 4000);
+          audioRef.current.start(camMicStream, 2000);
         }
 
-        const reference = identityReferenceImage || enrolledReference;
+        let reference = identityReferenceImage || enrolledReference || null;
+        if (!reference && identityReferenceUrl) {
+          try {
+            const res = await fetch(identityReferenceUrl);
+            const blob = await res.blob();
+            reference = await new Promise<string>((resolve, reject) => {
+              const fr = new FileReader();
+              fr.onload = () => resolve(String(fr.result));
+              fr.onerror = () => reject(fr.error);
+              fr.readAsDataURL(blob);
+            });
+            setEnrolledReference(reference);
+          } catch {
+            reference = null;
+          }
+        }
         const sens = policyRef.current?.ai_sensitivity || 'normal';
         const sensThreshold =
           sens === 'high' ? Math.min(identityThreshold + 8, 90) : sens === 'low' ? Math.max(identityThreshold - 8, 35) : identityThreshold;
@@ -513,6 +563,7 @@ export function ExamWindow(props: ExamWindowProps) {
             intervalMs: identityCheckIntervalMs,
             getStream: () => camMicStreamRef.current,
             threshold: sensThreshold,
+            failuresBeforeViolation: 1,
             onResult: (r) => setIdentitySimilarity(r.similarity),
             onMismatch: () => addViolation('identity_mismatch'),
             onRestored: () => {
@@ -530,6 +581,8 @@ export function ExamWindow(props: ExamWindowProps) {
           onChunk: buildChunkSignaler(client, sid),
         });
         screenRecorderRef.current.start(screenStream);
+        // Detect "Stop sharing" / screen track ended → PAUSE + violation capture
+        screenStream.getVideoTracks().forEach((t) => lockdownClientRef.current?.observeTrack(t, 'screen'));
       }
 
       await client.startStream(sid, {
@@ -571,6 +624,7 @@ export function ExamWindow(props: ExamWindowProps) {
       analyzeMinIntervalMs,
       phoneCheckMinIntervalMs,
       identityReferenceImage,
+      identityReferenceUrl,
       enrolledReference,
       continuousIdentityCheck,
       identityCheckIntervalMs,
@@ -588,6 +642,13 @@ export function ExamWindow(props: ExamWindowProps) {
     const t = setInterval(() => setSeconds((s) => (paused ? s : s + 1)), 1000);
     return () => clearInterval(t);
   }, [step, paused]);
+
+  // Brief resume toast — auto-clear so the candidate can continue without an extra click.
+  useEffect(() => {
+    if (controlModal?.kind !== 'resumed') return;
+    const t = window.setTimeout(() => setControlModal(null), 4500);
+    return () => window.clearTimeout(t);
+  }, [controlModal]);
 
   /** Periodic JPEG so tenant admins see the candidate without waiting for violations */
   useEffect(() => {
@@ -923,6 +984,22 @@ export function ExamWindow(props: ExamWindowProps) {
             collapsed={chatCollapsed}
             onCollapseChange={setChatCollapsed}
           />
+          {controlModal ? (
+            <SessionControlOverlay
+              kind={controlModal.kind}
+              message={controlModal.message}
+              brandPrimary={primary}
+              accentColor={accent}
+              onAcknowledge={() => {
+                const kind = controlModal.kind;
+                setControlModal(null);
+                if (kind === 'terminated' && sessionId) {
+                  setStep('submitted');
+                  onSessionEnd?.(sessionId);
+                }
+              }}
+            />
+          ) : null}
         </section>
       )}
 

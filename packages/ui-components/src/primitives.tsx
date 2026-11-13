@@ -44,7 +44,17 @@ export function Button({
   );
 }
 
-export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info' | 'brand';
+export type Tone =
+  | 'neutral'
+  | 'success'
+  | 'warning'
+  | 'danger'
+  | 'info'
+  | 'brand'
+  | 'critical'
+  | 'high'
+  | 'medium'
+  | 'low';
 
 export function Badge({ tone = 'neutral', children, dot }: { tone?: Tone; children: ReactNode; dot?: boolean }) {
   return (
@@ -53,6 +63,32 @@ export function Badge({ tone = 'neutral', children, dot }: { tone?: Tone; childr
       {children}
     </span>
   );
+}
+
+/** Map session/event severity strings to distinct badge tones. */
+export function severityTone(severity?: string | null): Tone {
+  const s = String(severity || '')
+    .trim()
+    .toUpperCase();
+  if (s === 'CRITICAL') return 'critical';
+  if (s === 'HIGH' || s === 'FLAG') return 'high';
+  if (s === 'MEDIUM' || s === 'WARN' || s === 'WARNING') return 'medium';
+  if (s === 'LOW' || s === 'INFO') return 'low';
+  if (s === 'CLEAN') return 'success';
+  return 'neutral';
+}
+
+export function SeverityBadge({
+  severity,
+  label,
+  children,
+}: {
+  severity?: string | null;
+  label?: string;
+  children?: ReactNode;
+}) {
+  const text = children ?? label ?? (severity ? String(severity).toUpperCase() : '—');
+  return <Badge tone={severityTone(severity)}>{text}</Badge>;
 }
 
 const STATUS_TONES: Record<string, Tone> = {

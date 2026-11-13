@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Badge,
@@ -9,6 +9,7 @@ import {
   DEFAULT_PAGE_SIZE,
   EmptyState,
   SearchInput,
+  SeverityBadge,
   Skeleton,
   StatusBadge,
   TablePagination,
@@ -23,9 +24,73 @@ export function ReviewBadge({ row }: { row: Pick<SessionRow, 'review_status' | '
     const tone = row.review_decision === 'flagged' ? 'danger' : row.review_decision === 'inconclusive' ? 'warning' : 'success';
     return <Badge tone={tone}>{decisionLabel(row.review_decision) || 'Reviewed'}</Badge>;
   }
-  if (row.review_status === 'in_review') return <Badge tone="info">In review</Badge>;
-  if (['completed', 'terminated', 'failed'].includes(row.status)) return <Badge tone="warning">Needs review</Badge>;
+  if (row.review_status === 'in_review') return <Badge tone="info">In progress</Badge>;
+  if (row.review_status === 'pending' || ['completed', 'terminated', 'failed'].includes(row.status)) {
+    return <Badge tone="warning">Needs review</Badge>;
+  }
   return <span className="ps-muted">—</span>;
+}
+
+function canMarkReviewed(row: Pick<SessionRow, 'review_status' | 'status'>) {
+  if (row.review_status === 'reviewed') return false;
+  return (
+    row.review_status === 'pending' ||
+    row.review_status === 'in_review' ||
+    ['completed', 'terminated', 'failed'].includes(row.status)
+  );
+}
+
+/** Badge + one-click Reviewed (cleared) so queue rows don't require opening full session detail. */
+export function ReviewCell({
+  row,
+  onDone,
+}: {
+  row: SessionRow;
+  onDone?: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const showBtn = canMarkReviewed(row);
+
+  const markReviewed = async (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api('POST', `/v1/sessions/${row.id}/review/decision`, {
+        decision: 'cleared',
+        summary: 'Marked reviewed from queue',
+      });
+      onDone?.();
+    } catch (ex) {
+      setErr((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span
+      className="ps-row"
+      style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      <ReviewBadge row={row} />
+      {showBtn && (
+        <Button size="sm" variant="success" loading={busy} onClick={(e) => void markReviewed(e)}>
+          Reviewed
+        </Button>
+      )}
+      {err && (
+        <span className="ps-cell-sub" style={{ color: 'var(--ps-danger)', maxWidth: 160 }}>
+          {err}
+        </span>
+      )}
+    </span>
+  );
 }
 
 export function ViolationCount({ row }: { row: Pick<SessionRow, 'violation_count' | 'high_severity_count'> }) {
@@ -33,7 +98,7 @@ export function ViolationCount({ row }: { row: Pick<SessionRow, 'violation_count
   return (
     <span className="ps-row" style={{ gap: 6 }}>
       <strong>{row.violation_count}</strong>
-      {row.high_severity_count > 0 && <Badge tone="danger">{row.high_severity_count} high</Badge>}
+      {row.high_severity_count > 0 && <Badge tone="high">{row.high_severity_count} high</Badge>}
     </span>
   );
 }
@@ -126,24 +191,34 @@ export function SessionsTable({
   );
 
   const load = useCallback(
-    async (append = false, nextCursor: string | null = null) => {
+    async (append = false, nextCursor: string | null = null, opts?: { soft?: boolean }) => {
       const id = ++reqId.current;
       if (append) setLoadingMore(true);
-      else setLoading(true);
+      else if (!opts?.soft) setLoading(true);
       try {
+        const fixed = JSON.parse(fixedKey) as Record<string, string>;
+        const effectiveStatus = fixed.status || status || undefined;
+        const wantsLive =
+          fixed.live_only === '1' ||
+          fixed.live_only === 'true' ||
+          effectiveStatus === 'active,paused';
         const r = await api<Paged<SessionRow>>(
           'GET',
           `${path}${qs({
             limit,
             next_cursor: append ? nextCursor : undefined,
             q: q.trim() || undefined,
-            status: status || undefined,
-            review_status: review || undefined,
             highest_severity: severity || undefined,
             has_violations: flaggedOnly || undefined,
             sort: sort || undefined,
-            ...JSON.parse(fixedKey),
-          })}`
+            // Fixed explorer filters win — never let stale URL state flip Needs review → Reviewed.
+            status: effectiveStatus,
+            review_status: fixed.review_status || review || undefined,
+            ...fixed,
+            live_only: wantsLive ? '1' : undefined,
+          })}`,
+          undefined,
+          { auth: opts?.soft ? 'soft' : 'hard' }
         );
         if (id !== reqId.current) return;
         setRows((prev) => (append ? [...prev, ...r.data] : r.data));
@@ -170,7 +245,11 @@ export function SessionsTable({
 
   useEffect(() => {
     if (!refreshMs) return;
-    const t = setInterval(() => void load(false), refreshMs);
+    const tick = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void load(false, null, { soft: true });
+    };
+    const t = setInterval(tick, refreshMs);
     return () => clearInterval(t);
   }, [load, refreshMs]);
 
@@ -429,17 +508,7 @@ export function SessionsTable({
                   <Td nowrap>{Math.round(Number(s.risk_score || 0))}</Td>
                   <Td>
                     {s.highest_severity ? (
-                      <Badge
-                        tone={
-                          String(s.highest_severity).toUpperCase() === 'CRITICAL' ||
-                          String(s.highest_severity).toUpperCase() === 'HIGH' ||
-                          String(s.highest_severity).toUpperCase() === 'FLAG'
-                            ? 'danger'
-                            : 'warning'
-                        }
-                      >
-                        {String(s.highest_severity).toUpperCase()}
-                      </Badge>
+                      <SeverityBadge severity={s.highest_severity} />
                     ) : (
                       <span className="ps-muted">—</span>
                     )}
@@ -454,7 +523,7 @@ export function SessionsTable({
                   </Td>
                   <Td muted>{s.reviewed_by || '—'}</Td>
                   <Td>
-                    <ReviewBadge row={s} />
+                    <ReviewCell row={s} onDone={() => void load(false)} />
                   </Td>
                 </>
               ) : (
@@ -474,7 +543,7 @@ export function SessionsTable({
                     </span>
                   </Td>
                   <Td>
-                    <ReviewBadge row={s} />
+                    <ReviewCell row={s} onDone={() => void load(false)} />
                   </Td>
                 </>
               )}

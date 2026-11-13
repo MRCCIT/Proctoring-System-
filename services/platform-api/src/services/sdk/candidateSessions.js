@@ -8,6 +8,7 @@ import { mergeSessionRecordings } from '../tenant/recordingMerge.js';
 import { emitWebhookEvent } from '../webhooks/dispatcher.js';
 import { assertSessionAdmission, onSessionStarted, onSessionEnded } from '../infra/admissionControl.js';
 import { resolveEffectivePolicy } from '../tenant/resolvePolicy.js';
+import { clipAiModules } from '../tenant/aiFeatureAllowList.js';
 
 export function buildSdkWsUrl(sessionId) {
   const base = config.publicApiBaseUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
@@ -171,20 +172,26 @@ export async function getSdkSessionConfig(tenantId, sessionId) {
         }
       : null,
     tenant_feature_flags: row.tenant_feature_flags,
-    policy: row.ai_config && typeof row.ai_config === 'object' && row.ai_config.ai_modules
-      ? row.ai_config
-      : {
-          source: 'exam',
-          ai_modules: row.ai_modules || {},
-          ai_sensitivity: row.ai_sensitivity || 'normal',
-          grace_period_seconds: 5,
-          severity_thresholds: { warn: 1, flag: 3, terminate: 8 },
-          whitelist: {},
-          rules: row.policy_template || {},
-        },
+    policy: (() => {
+      const flags = row.tenant_feature_flags || {};
+      const base =
+        row.ai_config && typeof row.ai_config === 'object' && row.ai_config.ai_modules
+          ? { ...row.ai_config }
+          : {
+              source: 'exam',
+              ai_modules: row.ai_modules || {},
+              ai_sensitivity: row.ai_sensitivity || 'normal',
+              grace_period_seconds: 5,
+              severity_thresholds: { warn: 1, flag: 3, terminate: 8 },
+              whitelist: {},
+              rules: row.policy_template || {},
+            };
+      return { ...base, ai_modules: clipAiModules(base.ai_modules || {}, flags) };
+    })(),
     effective_ai_config: {
       session: row.ai_config,
       exam_modules: row.ai_modules,
+      tenant_feature_flags: row.tenant_feature_flags,
     },
     pre_exam_checklist: {
       hardware: ['webcam', 'microphone', 'screen_resolution'],

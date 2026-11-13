@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Alert, Button, Field, Icon, Spinner } from '@proctorshield/ui-components';
-import { getClient, saveProfile, tenantTokens } from '@/lib/api';
+import { getClient, saveProfile, signOut, tenantTokens } from '@/lib/api';
 
 export default function SetPasswordPage() {
   const router = useRouter();
@@ -49,6 +49,7 @@ export default function SetPasswordPage() {
     setBusy(true);
     setErr('');
     try {
+      signOut();
       const res = await getClient().acceptTenantInvite({
         token,
         password,
@@ -60,6 +61,8 @@ export default function SetPasswordPage() {
         email: res.user?.email || meta?.email || null,
         org: res.tenant?.slug || meta?.tenant_slug || null,
         role: res.user?.role || null,
+        impersonation: false,
+        impersonator_email: null,
       });
       if (res.tenant?.slug) localStorage.setItem('ps_tenant_last_slug', res.tenant.slug);
       router.push('/dashboard');

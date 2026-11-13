@@ -2,15 +2,52 @@ import { getClient, signOut } from './api';
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
-/** Tenant API call; on an expired/invalid login the user is sent back to sign-in. */
-export async function api<T = unknown>(method: Method, path: string, body?: unknown): Promise<T> {
+export type ApiAuthMode = 'hard' | 'soft';
+
+export type ApiOptions = {
+  /**
+   * hard (default): 401 clears the session and sends the user to login.
+   * soft: 401 is surfaced to the caller only — used for background polls so a flaky
+   * or briefly-restarting API does not kick the admin off the page.
+   */
+  auth?: ApiAuthMode;
+};
+
+export const AUTH_SOFT_FAIL_EVENT = 'ps:auth-soft-fail';
+
+function emitAuthSoftFail() {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(AUTH_SOFT_FAIL_EVENT));
+}
+
+function redirectExpiredLogin() {
+  if (typeof window === 'undefined') return;
+  if (window.location.pathname.startsWith('/login')) return;
+  signOut();
+  window.location.href = '/login?expired=1';
+}
+
+/**
+ * Tenant API call.
+ * User actions should keep default hard auth; background polls should pass `{ auth: 'soft' }`.
+ */
+export async function api<T = unknown>(
+  method: Method,
+  path: string,
+  body?: unknown,
+  options?: ApiOptions
+): Promise<T> {
+  const mode: ApiAuthMode = options?.auth ?? 'hard';
   try {
     return await getClient().request<T>(method, path, body);
   } catch (e) {
     const status = (e as { status?: number }).status;
-    if (status === 401 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-      signOut();
-      window.location.href = '/login?expired=1';
+    if (status === 401) {
+      if (mode === 'soft') {
+        emitAuthSoftFail();
+      } else {
+        redirectExpiredLogin();
+      }
     }
     throw e;
   }

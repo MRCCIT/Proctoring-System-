@@ -1,37 +1,56 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Card, DataTable, Td } from '@proctorshield/ui-components';
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  DataTable,
+  EmptyState,
+  Field,
+  PageHeader,
+  StatusBadge,
+  Td,
+} from '@proctorshield/ui-components';
 import { AuthGuard } from '@/components/AuthGuard';
 import { TenantAdminShell } from '@/components/TenantAdminShell';
 import { getClient } from '@/lib/api';
+import { api } from '@/lib/tenantApi';
 
-interface TenantUser {
+interface ProctorRow {
   id: string;
   email: string;
   display_name: string | null;
-  role: string;
-  permissions: Record<string, string[]>;
-  created_at: string;
+  status: string;
+  max_candidate_capacity: number;
+  current_assigned: number;
+  available_capacity: number;
+  active_exam_count: number;
+  last_active_at?: string | null;
+  invited_at?: string | null;
+  invite_url?: string;
 }
 
-const RESOURCES = ['sessions', 'exams', 'candidates', 'branding', 'webhooks', 'sdk', 'users', 'reports', 'policies'];
+function statusLabel(s: string) {
+  if (s === 'pending') return 'Invited';
+  if (s === 'disabled') return 'Disabled';
+  return 'Active';
+}
 
 export default function UsersPage() {
-  const [items, setItems] = useState<TenantUser[]>([]);
-  const [defaults, setDefaults] = useState<Record<string, Record<string, string[]>>>({});
-  const [creating, setCreating] = useState({ email: '', password: '', display_name: '', role: 'sub_admin' });
+  const [items, setItems] = useState<ProctorRow[]>([]);
   const [err, setErr] = useState('');
-  const [editing, setEditing] = useState<TenantUser | null>(null);
+  const [toast, setToast] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ display_name: '', email: '', max_candidate_capacity: '20' });
+  const [edit, setEdit] = useState<ProctorRow | null>(null);
 
   const load = async () => {
+    setErr('');
     try {
-      const [users, dflt] = await Promise.all([
-        getClient().listTenantUsers(),
-        getClient().getTenantUserDefaults(),
-      ]);
-      setItems(users.data as TenantUser[]);
-      setDefaults((dflt.data?.defaults as Record<string, Record<string, string[]>>) || {});
+      const r = await api<{ data: ProctorRow[] }>('GET', '/v1/tenant/proctoring/proctors');
+      setItems(r.data || []);
     } catch (e) {
       setErr((e as Error).message);
     }
@@ -41,46 +60,48 @@ export default function UsersPage() {
     void load();
   }, []);
 
-  const create = async (e: React.FormEvent) => {
+  const invite = async (e: React.FormEvent) => {
     e.preventDefault();
+    setBusy(true);
     setErr('');
+    setToast('');
     try {
-      await getClient().createTenantUser(creating as unknown as Record<string, unknown>);
-      setCreating({ email: '', password: '', display_name: '', role: 'sub_admin' });
+      const r = await api<{ data: ProctorRow & { invite_url?: string } }>('POST', '/v1/tenant/proctoring/proctors/invite', {
+        display_name: form.display_name.trim() || undefined,
+        email: form.email.trim(),
+        max_candidate_capacity: parseInt(form.max_candidate_capacity, 10) || 20,
+      });
+      setForm({ display_name: '', email: '', max_candidate_capacity: '20' });
+      setToast(r.data.invite_url ? `Invite created. Link: ${r.data.invite_url}` : 'Invite sent.');
       await load();
     } catch (ex) {
       setErr((ex as Error).message);
+    } finally {
+      setBusy(false);
     }
-  };
-
-  const remove = async (id: string) => {
-    if (!confirm('Delete this user?')) return;
-    try {
-      await getClient().deleteTenantUser(id);
-      await load();
-    } catch (ex) {
-      setErr((ex as Error).message);
-    }
-  };
-
-  const toggleAction = (perms: Record<string, string[]>, resource: string, action: string) => {
-    const next = { ...perms };
-    const current = new Set(next[resource] || []);
-    if (current.has(action)) current.delete(action);
-    else current.add(action);
-    next[resource] = [...current];
-    return next;
   };
 
   const saveEdit = async () => {
-    if (!editing) return;
+    if (!edit) return;
+    setBusy(true);
+    setErr('');
     try {
-      await getClient().updateTenantUser(editing.id, {
-        display_name: editing.display_name,
-        role: editing.role,
-        permissions: editing.permissions,
-      });
-      setEditing(null);
+      await getClient().updateTenantUser(edit.id, {
+        display_name: edit.display_name,
+        max_candidate_capacity: Number(edit.max_candidate_capacity),
+      } as Record<string, unknown>);
+      setEdit(null);
+      await load();
+    } catch (ex) {
+      setErr((ex as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setStatus = async (id: string, status: string) => {
+    try {
+      await getClient().updateTenantUser(id, { status } as Record<string, unknown>);
       await load();
     } catch (ex) {
       setErr((ex as Error).message);
@@ -90,163 +111,129 @@ export default function UsersPage() {
   return (
     <AuthGuard>
       <TenantAdminShell>
-        <h1>Sub-admins & proctors</h1>
-        <p className="muted">
-          Granular role-based permissions. POST /v1/tenant/users · PATCH /v1/tenant/users/:id
-        </p>
-        {err && <p className="error">{err}</p>}
+        <PageHeader
+          title="Proctors"
+          description="Invite monitoring staff, set candidate capacity, and track workload. They set their own password via invite link."
+          breadcrumbs={[{ label: 'Advanced' }, { label: 'Team' }]}
+        />
+        {err && <Alert tone="danger">{err}</Alert>}
+        {toast && <Alert tone="success">{toast}</Alert>}
 
-        <Card>
-          <h3 style={{ marginTop: 0 }}>Create new user</h3>
-          <form onSubmit={create} style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-            <input
-              placeholder="email"
-              required
-              value={creating.email}
-              onChange={(e) => setCreating({ ...creating, email: e.target.value })}
-            />
-            <input
-              placeholder="display name"
-              value={creating.display_name}
-              onChange={(e) => setCreating({ ...creating, display_name: e.target.value })}
-            />
-            <input
-              type="password"
-              placeholder="password (min 8)"
-              required
-              minLength={8}
-              value={creating.password}
-              onChange={(e) => setCreating({ ...creating, password: e.target.value })}
-            />
-            <select value={creating.role} onChange={(e) => setCreating({ ...creating, role: e.target.value })}>
-              <option value="admin">admin</option>
-              <option value="sub_admin">sub_admin</option>
-              <option value="proctor">proctor</option>
-              <option value="viewer">viewer</option>
-            </select>
-            <button type="submit" className="primary" style={{ gridColumn: 'span 4' }}>
-              Create user
-            </button>
+        <Card title="Invite proctor" description="No password from admin — invite email / link sets credentials.">
+          <form onSubmit={invite} className="ps-grid-2" style={{ gap: 12 }}>
+            <Field label="Name">
+              <input
+                value={form.display_name}
+                onChange={(e) => setForm({ ...form, display_name: e.target.value })}
+                placeholder="Proctor name"
+              />
+            </Field>
+            <Field label="Email" required>
+              <input
+                type="email"
+                required
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                placeholder="proctor@org.edu"
+              />
+            </Field>
+            <Field label="Max candidate capacity" required>
+              <input
+                type="number"
+                min={1}
+                required
+                value={form.max_candidate_capacity}
+                onChange={(e) => setForm({ ...form, max_candidate_capacity: e.target.value })}
+              />
+            </Field>
+            <div style={{ display: 'flex', alignItems: 'end' }}>
+              <Button type="submit" variant="primary" loading={busy}>
+                Send invite
+              </Button>
+            </div>
           </form>
         </Card>
 
-        <h2 style={{ marginTop: 24 }}>Users</h2>
-        <DataTable headers={['Email', 'Display', 'Role', 'Created', '']}>
-          {items.map((u) => (
-            <tr key={u.id}>
-              <Td>{u.email}</Td>
-              <Td>{u.display_name || '—'}</Td>
-              <Td>{u.role}</Td>
-              <Td>{new Date(u.created_at).toLocaleString()}</Td>
-              <Td>
-                <button type="button" onClick={() => setEditing(u)} style={{ marginRight: 6 }}>
-                  Edit
-                </button>
-                <button type="button" onClick={() => void remove(u.id)} style={{ background: '#fee2e2' }}>
-                  Delete
-                </button>
-              </Td>
-            </tr>
-          ))}
-        </DataTable>
+        <div style={{ marginTop: 16 }}>
+          <DataTable
+            headers={['Proctor', 'Status', 'Capacity', 'Assigned', 'Available', 'Exams', 'Last active', '']}
+            isEmpty={!items.length}
+            empty={<EmptyState icon="users" title="No proctors yet" description="Invite your first monitoring proctor." />}
+          >
+            {items.map((p) => (
+              <tr key={p.id}>
+                <Td>
+                  <strong>{p.display_name || '—'}</strong>
+                  <div style={{ fontSize: 12, color: '#64748b' }}>{p.email}</div>
+                </Td>
+                <Td>
+                  <StatusBadge status={p.status} label={statusLabel(p.status)} />
+                </Td>
+                <Td>{p.max_candidate_capacity}</Td>
+                <Td>{p.current_assigned}</Td>
+                <Td>
+                  <Badge tone={p.available_capacity > 0 ? 'success' : 'warning'}>{p.available_capacity}</Badge>
+                </Td>
+                <Td>{p.active_exam_count}</Td>
+                <Td muted nowrap>
+                  {p.last_active_at ? new Date(p.last_active_at).toLocaleString() : '—'}
+                </Td>
+                <Td>
+                  <div className="ps-inline" style={{ gap: 6 }}>
+                    <Button onClick={() => setEdit({ ...p, status: p.status })}>Edit</Button>
+                    {p.status === 'active' ? (
+                      <Button variant="danger" onClick={() => void setStatus(p.id, 'disabled')}>
+                        Disable
+                      </Button>
+                    ) : p.status === 'disabled' ? (
+                      <Button variant="success" onClick={() => void setStatus(p.id, 'active')}>
+                        Activate
+                      </Button>
+                    ) : null}
+                  </div>
+                </Td>
+              </tr>
+            ))}
+          </DataTable>
+        </div>
 
-        {editing && (
+        {edit && (
           <div
             style={{
               position: 'fixed',
               inset: 0,
-              background: 'rgba(15,23,42,0.55)',
+              background: 'rgba(15,23,42,0.5)',
+              zIndex: 40,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              zIndex: 50,
             }}
-            onClick={() => setEditing(null)}
+            onClick={() => setEdit(null)}
           >
             <div
+              style={{ background: '#fff', padding: 20, borderRadius: 12, width: 'min(420px, 92vw)' }}
               onClick={(e) => e.stopPropagation()}
-              style={{
-                background: '#fff',
-                padding: 20,
-                borderRadius: 12,
-                width: 'min(720px, 92vw)',
-                maxHeight: '90vh',
-                overflowY: 'auto',
-              }}
             >
-              <h2 style={{ marginTop: 0 }}>Edit {editing.email}</h2>
-              <label>
-                Display name
+              <h3 style={{ marginTop: 0 }}>Edit proctor</h3>
+              <Field label="Name">
                 <input
-                  value={editing.display_name || ''}
-                  onChange={(e) => setEditing({ ...editing, display_name: e.target.value })}
-                  style={{ width: '100%' }}
+                  value={edit.display_name || ''}
+                  onChange={(e) => setEdit({ ...edit, display_name: e.target.value })}
                 />
-              </label>
-              <label style={{ display: 'block', marginTop: 12 }}>
-                Role
-                <select
-                  value={editing.role}
-                  onChange={(e) => {
-                    const role = e.target.value;
-                    const perms = defaults[role] || editing.permissions;
-                    setEditing({ ...editing, role, permissions: perms });
-                  }}
-                >
-                  <option value="admin">admin</option>
-                  <option value="sub_admin">sub_admin</option>
-                  <option value="proctor">proctor</option>
-                  <option value="viewer">viewer</option>
-                </select>
-              </label>
-              <h3 style={{ marginTop: 16 }}>Permissions</h3>
-              <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr>
-                    <th align="left">Resource</th>
-                    <th align="left">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {RESOURCES.map((r) => {
-                    const allActions = Array.from(
-                      new Set(Object.values(defaults).flatMap((p) => p[r] || []))
-                    );
-                    return (
-                      <tr key={r}>
-                        <td style={{ padding: '4px 6px' }}>{r}</td>
-                        <td style={{ padding: '4px 6px' }}>
-                          {allActions.map((a) => {
-                            const has = (editing.permissions[r] || []).includes(a);
-                            return (
-                              <label key={a} style={{ marginRight: 10, fontSize: 12 }}>
-                                <input
-                                  type="checkbox"
-                                  checked={has}
-                                  onChange={() =>
-                                    setEditing({
-                                      ...editing,
-                                      permissions: toggleAction(editing.permissions, r, a),
-                                    })
-                                  }
-                                />{' '}
-                                {a}
-                              </label>
-                            );
-                          })}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
-                <button type="button" onClick={() => setEditing(null)}>
-                  Cancel
-                </button>
-                <button type="button" className="primary" onClick={() => void saveEdit()}>
-                  Save changes
-                </button>
+              </Field>
+              <Field label="Max capacity">
+                <input
+                  type="number"
+                  min={1}
+                  value={edit.max_candidate_capacity}
+                  onChange={(e) => setEdit({ ...edit, max_candidate_capacity: parseInt(e.target.value, 10) || 1 })}
+                />
+              </Field>
+              <div className="ps-inline" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+                <Button onClick={() => setEdit(null)}>Cancel</Button>
+                <Button variant="primary" loading={busy} onClick={() => void saveEdit()}>
+                  Save
+                </Button>
               </div>
             </div>
           </div>

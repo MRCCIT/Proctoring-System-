@@ -89,9 +89,14 @@ export function IdentityVerification(props: IdentityVerificationProps) {
 
       let result: { similarity: number; verified: boolean; detector: string } | undefined;
       try {
-        const body = referenceUrl
-          ? { profile_url: referenceUrl, live_url: captured, identity_threshold: minPct }
-          : { reference_image: referenceImage!, live_image: captured, identity_threshold: minPct };
+        // `captured` is always a data URL from the webcam canvas — never send it as live_url
+        // (AI load_image_from_url only accepts http/https). Prefer image pair; if only a
+        // reference HTTP URL exists, send profile_url + live_image (mixed).
+        const body = referenceImage
+          ? { reference_image: referenceImage, live_image: captured, identity_threshold: minPct }
+          : referenceUrl
+            ? { profile_url: referenceUrl, live_image: captured, identity_threshold: minPct }
+            : { reference_image: referenceImage!, live_image: captured, identity_threshold: minPct };
         const resp = (await client.faceCompareAi(sessionId, body)) as ServerCompareResponse;
         const sim = Number(resp?.data?.similarity ?? 0);
         const verified = isIdentityVerified(resp?.data, minPct);

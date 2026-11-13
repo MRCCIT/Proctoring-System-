@@ -33,7 +33,14 @@ export function laneDecision(operation, { loadLevel = 'L0', tenantId = null } = 
   }
 
   const policy = LANE_POLICY[lane];
-  const degrade = loadLevel >= 'L2' || loadLevel === 'L3' || loadLevel === 'L4';
+  // P2/P3/P4 drop only under severe load (L4). L2/L3 still allow exports so
+  // local/demo and moderate production load do not hard-fail report downloads.
+  // Set EXPORTS_DEFER_FROM=L2 (or L3) to restore stricter shedding.
+  const deferFrom = String(process.env.EXPORTS_DEFER_FROM || 'L4').toUpperCase();
+  const order = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
+  const levelN = order[String(loadLevel || 'L0').toUpperCase()] ?? 0;
+  const deferN = order[deferFrom] ?? 4;
+  const degrade = levelN >= deferN;
   const allow =
     lane === 'P0' ||
     lane === 'P1' ||

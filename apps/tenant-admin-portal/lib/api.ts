@@ -16,6 +16,9 @@ export interface TenantProfile {
   role?: string | null;
   /** @deprecated legacy field; use tenant_name */
   org?: string | null;
+  /** Super-admin opened this tenant console via impersonation handoff. */
+  impersonation?: boolean;
+  impersonator_email?: string | null;
 }
 
 export function getClient() {

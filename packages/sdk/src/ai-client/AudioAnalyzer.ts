@@ -26,6 +26,8 @@ export class AudioAnalyzer {
         .AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Ctx) return;
       this.ctx = new Ctx();
+      // Browsers often start AudioContext suspended until resume after a gesture.
+      void this.ctx.resume().catch(() => {});
       this.source = this.ctx.createMediaStreamSource(stream);
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 1024;

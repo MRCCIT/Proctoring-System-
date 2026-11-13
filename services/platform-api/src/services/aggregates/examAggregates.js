@@ -2,6 +2,7 @@ import { query } from '../../config/database.js';
 import { getRedis, isRedisEnabled } from '../../config/redis.js';
 import { violationSqlPredicate } from '../events/violationCatalog.js';
 import { computeRiskScore } from '../risk/riskScore.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 const refreshInflight = new Map();
 const EXAM_AGG_REDIS_TTL_SEC = 60;
@@ -63,6 +64,12 @@ export async function refreshExamAggregate(examId, { updateRisk = true } = {}) {
           [s.id, score, highest_severity]
         );
       }
+      // Dynamic allocation: fill free capacity for exams with auto_allocate pools
+      void import('../tenant/proctorAssignmentEngine.js')
+        .then(({ runAllocation }) =>
+          runAllocation(exam.tenant_id, examId, { notify: true, dry_run: false }).catch(() => null)
+        )
+        .catch(() => {});
     }
 
     const vio = violationSqlPredicate('se');
@@ -73,7 +80,7 @@ export async function refreshExamAggregate(examId, { updateRisk = true } = {}) {
          count(*) FILTER (WHERE s.status = 'scheduled')::int AS absent,
          count(*) FILTER (WHERE s.status = 'completed')::int AS submitted,
          count(*) FILTER (WHERE s.status IN ('terminated','failed'))::int AS terminated,
-         count(*) FILTER (WHERE s.status IN ('active','paused'))::int AS live_count,
+         count(*) FILTER (WHERE ${livePresenceSql('s')})::int AS live_count,
          count(*) FILTER (WHERE s.review_decision = 'flagged')::int AS flagged_count,
          count(*) FILTER (WHERE COALESCE(s.review_status,'pending') <> 'reviewed' AND s.status IN ('completed','terminated','failed'))::int AS review_pending,
          count(*) FILTER (WHERE COALESCE(s.review_status,'pending') = 'reviewed')::int AS review_done,

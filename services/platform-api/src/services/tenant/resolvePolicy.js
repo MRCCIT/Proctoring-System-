@@ -1,9 +1,11 @@
 import { query } from '../../config/database.js';
+import { clipAiModules, getTenantFeatureFlags } from './aiFeatureAllowList.js';
 
 export const DEFAULT_AI_MODULES = {
   face_detection: true,
   multiple_faces: true,
   gaze_tracking: true,
+  phone_detection: true,
   object_detection: true,
   audio_voice: true,
   audio_noise: true,
@@ -192,6 +194,10 @@ export async function resolveEffectivePolicy(tenantId, { examId = null, override
     resolved = applyOverrides(resolved, cleanOverrides);
   }
 
+  // Continuous SA allow-list: disabled services never run, even if template still lists them
+  const flags = await getTenantFeatureFlags(query, tenantId);
+  resolved.ai_modules = clipAiModules(resolved.ai_modules, flags);
+
   return {
     ...resolved,
     resolved_at: new Date().toISOString(),
@@ -264,5 +270,7 @@ export async function materializeExamPolicyFields(tenantId, { policy_template_id
     };
   }
 
+  const flags = await getTenantFeatureFlags(query, tenantId);
+  out.ai_modules = clipAiModules(out.ai_modules, flags);
   return out;
 }

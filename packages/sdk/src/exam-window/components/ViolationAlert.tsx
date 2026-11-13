@@ -4,10 +4,15 @@ const LABELS: Record<string, string> = {
   blocked_shortcut: 'Blocked keyboard shortcut',
   tab_hidden: 'Tab switched away',
   tab_visible: 'Tab visible again',
+  visibility_hidden: 'Tab switched away',
+  visibility_visible: 'Tab visible again',
   context_menu: 'Right-click attempted',
   copy_attempt: 'Copy attempted',
   paste_attempt: 'Paste attempted',
   cut_attempt: 'Cut attempted',
+  copy: 'Copy attempted',
+  paste: 'Paste attempted',
+  cut: 'Cut attempted',
   window_blur: 'Lost window focus',
   window_focus: 'Window focus returned',
   fullscreen_exit: 'Fullscreen exited',
@@ -20,13 +25,24 @@ const LABELS: Record<string, string> = {
   no_face_detected: 'No face detected in camera',
   multiple_faces_detected: 'Multiple faces detected',
   audio_voice_detected: 'Background voice detected',
+  audio_noise_detected: 'Loud background noise detected',
+  screen_share_ended: 'Screen sharing stopped',
+  track_ended: 'Camera or microphone stopped',
+  track_muted: 'Camera or microphone muted',
   network_offline: 'Network connection lost',
   keystroke_paste_burst: 'Paste-like keystroke burst',
   keystroke_high_velocity: 'Unusually fast typing',
   keystroke_long_pause: 'Unusually long pause',
 };
 
-const NOT_ALERTS = new Set(['tab_visible', 'window_focus', 'single_display_detected', 'network_online']);
+const NOT_ALERTS = new Set([
+  'tab_visible',
+  'visibility_visible',
+  'window_focus',
+  'single_display_detected',
+  'network_online',
+  'heartbeat',
+]);
 
 const PATTERN_LABELS: Array<[RegExp, string]> = [
   [/gaze|looking_sideways/, 'Looking away from the screen'],

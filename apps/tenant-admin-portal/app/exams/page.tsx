@@ -125,7 +125,7 @@ export default function ExamsPage() {
                   <Td>{e.session_count}</Td>
                   <Td>{e.live_count ? <Badge tone="success" dot>{e.live_count}</Badge> : <span className="ps-muted">0</span>}</Td>
                   <Td>{e.awaiting_review_count ? <Badge tone="warning">{e.awaiting_review_count}</Badge> : <span className="ps-muted">0</span>}</Td>
-                  <Td>{e.flagged_count ? <Badge tone="danger">{e.flagged_count}</Badge> : <span className="ps-muted">0</span>}</Td>
+                  <Td>{e.flagged_count ? <Badge tone="high">{e.flagged_count}</Badge> : <span className="ps-muted">0</span>}</Td>
                   <Td muted nowrap>
                     {e.last_session_at ? relativeTime(e.last_session_at) : 'No sessions'}
                   </Td>

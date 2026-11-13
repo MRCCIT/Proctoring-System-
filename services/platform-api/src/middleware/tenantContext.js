@@ -53,7 +53,8 @@ export const requireTenantContext = asyncHandler(async (req, res, next) => {
         })
       );
     }
-    if (decoded.role !== 'tenant_admin' || !decoded.tenant_id) {
+    const allowedJwtRoles = new Set(['tenant_admin', 'admin', 'sub_admin', 'proctor', 'viewer']);
+    if (!allowedJwtRoles.has(decoded.role) || !decoded.tenant_id) {
       return res.status(401).type('application/problem+json').json(
         problemDetails({
           type: ProblemTypes.unauthorized,
@@ -87,12 +88,73 @@ export const requireTenantContext = asyncHandler(async (req, res, next) => {
         })
       );
     }
+
+    let tenantUser = null;
+    if (decoded.sub) {
+      let users;
+      try {
+        ({ rows: users } = await query(
+          `SELECT id, email, display_name, role, permissions, status,
+                  max_candidate_capacity, last_active_at
+             FROM tenant_users
+            WHERE id = $1 AND tenant_id = $2`,
+          [decoded.sub, tenant.id]
+        ));
+      } catch {
+        ({ rows: users } = await query(
+          `SELECT id, email, display_name, role, permissions, status
+             FROM tenant_users
+            WHERE id = $1 AND tenant_id = $2`,
+          [decoded.sub, tenant.id]
+        ));
+      }
+      tenantUser = users[0] || null;
+      if (tenantUser && tenantUser.status && !['active', 'pending'].includes(tenantUser.status)) {
+        return res.status(403).type('application/problem+json').json(
+          problemDetails({
+            type: ProblemTypes.forbidden,
+            title: 'Forbidden',
+            status: 403,
+            detail: 'User account is disabled.',
+          })
+        );
+      }
+      // Legacy JWT role tenant_admin → treat as admin if DB missing
+      if (tenantUser && decoded.role === 'tenant_admin' && !tenantUser.role) {
+        tenantUser.role = 'admin';
+      }
+      if (!tenantUser && decoded.role === 'tenant_admin') {
+        tenantUser = {
+          id: decoded.sub,
+          email: decoded.email,
+          role: 'admin',
+          permissions: null,
+          status: 'active',
+        };
+      }
+      if (!tenantUser && decoded.impersonation) {
+        tenantUser = {
+          id: decoded.sub,
+          email: decoded.email,
+          display_name: decoded.display_name || decoded.email || 'Super Admin',
+          role: decoded.role === 'sub_admin' ? 'sub_admin' : 'admin',
+          permissions: decoded.permissions || null,
+          status: 'active',
+        };
+      }
+    }
+
+    req.tenantUser = tenantUser;
     req.tenantContext = {
       tenantId: tenant.id,
       tenantSlug: tenant.slug,
       authMode: 'jwt',
       userId: decoded.sub,
       email: decoded.email,
+      role: tenantUser?.role || decoded.role,
+      impersonation: Boolean(decoded.impersonation),
+      impersonatedBy: decoded.impersonated_by || null,
+      impersonatorEmail: decoded.impersonator_email || null,
     };
     return next();
   }

@@ -17,6 +17,7 @@ export function ensureDir(p) {
 ensureDir(STORAGE_DIR);
 ensureDir(path.join(STORAGE_DIR, 'recordings'));
 ensureDir(path.join(STORAGE_DIR, 'snapshots'));
+ensureDir(path.join(STORAGE_DIR, 'exports'));
 ensureDir(path.join(STORAGE_DIR, 'identity', 'references'));
 
 /** Returns the absolute path for a given storage-relative key. */

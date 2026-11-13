@@ -17,17 +17,26 @@ export function verifySuperAdminToken(token) {
   return jwt.verify(token, config.jwtSecret);
 }
 
-export function signTenantAdminToken(payload) {
-  return jwt.sign(
-    {
-      sub: payload.sub,
-      email: payload.email,
-      tenant_id: payload.tenant_id,
-      role: 'tenant_admin',
-    },
-    config.jwtSecret,
-    { expiresIn: config.jwtExpiresIn }
-  );
+export function signTenantAdminToken(payload, options = {}) {
+  // role = DB role (admin|sub_admin|proctor|viewer). Legacy tokens may still say tenant_admin.
+  const body = {
+    sub: payload.sub,
+    email: payload.email,
+    tenant_id: payload.tenant_id,
+    role: payload.role || 'admin',
+    permissions: payload.permissions || undefined,
+  };
+  if (payload.impersonation) {
+    body.impersonation = true;
+    body.impersonated_by = payload.impersonated_by || undefined;
+    body.impersonator_email = payload.impersonator_email || undefined;
+    body.display_name = payload.display_name || undefined;
+    body.tenant_slug = payload.tenant_slug || undefined;
+    body.tenant_name = payload.tenant_name || undefined;
+  }
+  return jwt.sign(body, config.jwtSecret, {
+    expiresIn: options.expiresIn || config.jwtExpiresIn,
+  });
 }
 
 export function verifyTenantAdminToken(token) {

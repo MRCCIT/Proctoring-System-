@@ -1,6 +1,7 @@
 import { fetchAiHealth, getAiGatewayStats } from '../ai/aiClient.js';
 import { getCapacitySnapshot, setSoftConcurrencyLimit } from '../infra/admissionControl.js';
 import { query } from '../../config/database.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 export async function getTenantAiHealth(tenantId) {
   const [ai, capacity, recent] = await Promise.all([
@@ -9,7 +10,7 @@ export async function getTenantAiHealth(tenantId) {
     query(
       `SELECT
          COUNT(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS sessions_1h,
-         COUNT(*) FILTER (WHERE status IN ('active','paused'))::int AS live_now,
+         COUNT(*) FILTER (WHERE ${livePresenceSql('')})::int AS live_now,
          COALESCE(SUM(violation_flags) FILTER (WHERE created_at > now() - interval '1 hour'), 0)::bigint AS flags_1h
        FROM exam_sessions
        WHERE tenant_id = $1`,

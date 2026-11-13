@@ -3,6 +3,7 @@ import { getRecentCounters } from './aggregator.js';
 import { getWsStats } from '../../ws/wsStats.js';
 import { getLaneStats } from '../queue/laneStats.js';
 import { getGlobalPolicies } from './policies.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 async function upsertAlert({ severity, service_name, title, message, trigger_metric, trigger_value, threshold_value, tenant_id, details }) {
   try {
@@ -129,7 +130,7 @@ export async function evaluateAlerts({ live = [], hardware = null } = {}) {
   try {
     const { rows } = await query(
       `SELECT t.id, t.name, t.quotas,
-              (SELECT COUNT(*)::int FROM exam_sessions s WHERE s.tenant_id = t.id AND s.status IN ('active','paused')) AS live
+              (SELECT COUNT(*)::int FROM exam_sessions s WHERE s.tenant_id = t.id AND ${livePresenceSql('s')}) AS live
          FROM tenants t WHERE t.status = 'active'`
     );
     for (const r of rows) {

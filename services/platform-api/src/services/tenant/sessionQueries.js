@@ -1,6 +1,7 @@
 import { query } from '../../config/database.js';
 import { decodeCursor, encodeCursor } from '../../utils/cursor.js';
 import { violationSqlPredicate } from '../events/violationCatalog.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -127,6 +128,9 @@ export function buildSessionFilters(tenantId, f) {
     params.push(f.to);
     where.push(`s.created_at <= $${params.length}::timestamptz`);
   }
+  if (f.live_only === true || f.live_only === 'true' || f.live_only === '1') {
+    where.push(livePresenceSql('s'));
+  }
   return { params, where };
 }
 
@@ -186,7 +190,7 @@ export async function getSessionEnriched(tenantId, sessionId) {
 
 export async function listLiveSessionsEnriched(tenantId, { limit, exam_id } = {}) {
   const params = [tenantId];
-  let where = `s.tenant_id = $1 AND s.status IN ('active', 'paused')`;
+  let where = `s.tenant_id = $1 AND ${livePresenceSql('s')}`;
   if (exam_id) {
     params.push(exam_id);
     where += ` AND s.exam_id = $${params.length}::uuid`;
@@ -199,7 +203,7 @@ export async function listLiveSessionsEnriched(tenantId, { limit, exam_id } = {}
               ORDER BY fc.occurred_at DESC LIMIT 1) AS last_identity_score
      ${SESSIONS_FROM_SQL}
      WHERE ${where}
-     ORDER BY COALESCE(s.started_at, s.created_at) DESC
+     ORDER BY COALESCE(s.last_heartbeat_at, s.started_at, s.created_at) DESC
      LIMIT $${params.length}`,
     params
   );
@@ -212,7 +216,7 @@ export async function tenantOverview(tenantId) {
     query(
       `SELECT
          count(*)::int AS total_sessions,
-         count(*) FILTER (WHERE status IN ('active','paused'))::int AS live_sessions,
+         count(*) FILTER (WHERE ${livePresenceSql('')})::int AS live_sessions,
          count(*) FILTER (WHERE status = 'scheduled')::int AS pending_sessions,
          count(*) FILTER (WHERE status = 'completed')::int AS completed_sessions,
          count(*) FILTER (WHERE status IN ('terminated','failed'))::int AS ended_abnormally,
@@ -244,7 +248,7 @@ export async function tenantOverview(tenantId) {
     query(
       `SELECT e.id, e.title, e.external_exam_id,
               count(s.id)::int AS sessions,
-              count(s.id) FILTER (WHERE s.status IN ('active','paused'))::int AS live,
+              count(s.id) FILTER (WHERE ${livePresenceSql('s')})::int AS live,
               max(s.created_at) AS last_session_at
        FROM exams e
        LEFT JOIN exam_sessions s ON s.exam_id = e.id

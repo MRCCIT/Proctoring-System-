@@ -1,9 +1,15 @@
 import { query } from '../../config/database.js';
+import {
+  allowedServicesList,
+  clipAiModules,
+  getTenantFeatureFlags,
+} from './aiFeatureAllowList.js';
 
 const DEFAULT_AI_MODULES = {
   face_detection: true,
   multiple_faces: true,
   gaze_tracking: true,
+  phone_detection: true,
   object_detection: true,
   audio_voice: true,
   audio_noise: true,
@@ -45,6 +51,7 @@ export async function ensureDefaultPolicyTemplates(tenantId) {
 
 export async function listPolicyTemplates(tenantId) {
   await ensureDefaultPolicyTemplates(tenantId);
+  const flags = await getTenantFeatureFlags(query, tenantId);
   const { rows } = await query(
     `SELECT p.id, p.name, p.description, p.rules, p.ai_modules, p.ai_sensitivity, p.grace_period_seconds,
             p.severity_thresholds, p.whitelist, p.is_default, p.created_at, p.updated_at,
@@ -57,7 +64,16 @@ export async function listPolicyTemplates(tenantId) {
       ORDER BY p.is_default DESC, p.created_at DESC`,
     [tenantId]
   );
-  return rows;
+  // Clip to current SA allow-list so updates reflect immediately on this page
+  return {
+    items: rows.map((row) => ({
+      ...row,
+      ai_modules: clipAiModules(row.ai_modules, flags),
+      effective_modules: clipAiModules(row.ai_modules, flags),
+    })),
+    allowed_services: allowedServicesList(flags),
+    feature_flags: flags,
+  };
 }
 
 export async function getPolicyTemplate(tenantId, id) {

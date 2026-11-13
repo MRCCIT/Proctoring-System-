@@ -32,10 +32,15 @@ function examStatus(
     if (e.session_count === 0) return { label: 'Scheduled', tone: 'info' };
     return { label: 'Recently active', tone: 'neutral' };
   }
-  if ((e.awaiting_review_count || e.review_pending || 0) > 0) return { label: 'Needs review', tone: 'warning' };
+  const awaiting = Number(e.awaiting_review_count ?? e.review_pending ?? 0);
+  const done = Number(e.review_done ?? 0);
+  const progress = e.review_progress_pct != null ? Number(e.review_progress_pct) : awaiting + done === 0 ? 100 : Math.round((100 * done) / (awaiting + done));
+  if (awaiting > 0) return { label: 'Needs review', tone: 'warning' };
   if (e.flagged_count > 0) return { label: 'Flagged cases', tone: 'danger' };
-  if ((e.review_progress_pct ?? 100) >= 100) return { label: 'Reviewed', tone: 'success' };
-  return { label: 'In review', tone: 'info' };
+  if (done > 0 && progress >= 100) return { label: 'Reviewed', tone: 'success' };
+  if (done > 0) return { label: 'In review', tone: 'info' };
+  if ((e.session_count || 0) === 0) return { label: 'No sessions', tone: 'neutral' };
+  return { label: 'Reviewed', tone: 'success' };
 }
 
 function scheduleLabel(e: ExamRow) {
@@ -200,11 +205,11 @@ export function ExamListView({ mode }: { mode: ExamExplorerMode }) {
                     )}
                   </Td>
                   <Td>
-                    {e.flagged_count ? <Badge tone="danger">{e.flagged_count}</Badge> : <span className="ps-muted">0</span>}
+                    {e.flagged_count ? <Badge tone="high">{e.flagged_count}</Badge> : <span className="ps-muted">0</span>}
                   </Td>
                   <Td>
                     {(e.critical_violation_count || 0) > 0 ? (
-                      <Badge tone="danger">{e.critical_violation_count}</Badge>
+                      <Badge tone="critical">{e.critical_violation_count}</Badge>
                     ) : (
                       <span className="ps-muted">0</span>
                     )}

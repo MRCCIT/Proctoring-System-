@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import {
   Alert,
   Badge,
@@ -14,6 +14,7 @@ import {
   KeyValue,
   Modal,
   PageHeader,
+  SeverityBadge,
   Spinner,
   StatCard,
   StatusBadge,
@@ -33,9 +34,13 @@ import {
   type SessionRow,
 } from '@/lib/tenantApi';
 import { decisionLabel, formatDateTime, formatDuration, formatOffset, formatTime, relativeTime } from '@/lib/format';
+import { isSessionPresent, isSessionStatusLive } from '@/lib/sessionPresence';
+import { usePageVisible } from '@/hooks/usePageVisible';
 
 type Tab = 'review' | 'evidence' | 'activity' | 'history';
 type Decision = 'cleared' | 'flagged' | 'inconclusive';
+
+const SNAPSHOT_PAGE_SIZE = 48;
 
 const SOURCE_LABEL: Record<string, string> = { ai: 'AI', browser: 'Browser', proctor: 'Proctor', system: 'System' };
 const SEVERITY_LABEL: Record<string, string> = { flag: 'High', critical: 'Critical', warn: 'Medium', info: 'Info' };
@@ -68,6 +73,8 @@ function nearestSnapshot(snaps: EvidenceSnapshot[], iso: string) {
 
 export default function SessionDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
+  const embed = searchParams?.get('embed') === '1';
   const [session, setSession] = useState<SessionRow | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [evidence, setEvidence] = useState<Evidence | null>(null);
@@ -87,30 +94,38 @@ export default function SessionDetailPage() {
   const [noteText, setNoteText] = useState('');
   const [endOpen, setEndOpen] = useState(false);
   const [lightbox, setLightbox] = useState<EvidenceSnapshot | null>(null);
+  const [snapPage, setSnapPage] = useState(0);
   const playerRef = useRef<RecordingPlayerHandle>(null);
   const playheadRef = useRef<string | null>(null);
+  const pageVisible = usePageVisible();
 
-  const loadCore = useCallback(async () => {
+  const loadCore = useCallback(async (opts?: { soft?: boolean }) => {
     try {
+      const auth = opts?.soft ? 'soft' : 'hard';
       const [d, h] = await Promise.all([
-        api<{ data: { session: SessionRow; events: SessionEvent[] } }>('GET', `/v1/sessions/${id}`),
-        api<{ data: ReviewHistoryRow[] }>('GET', `/v1/sessions/${id}/review`),
+        api<{ data: { session: SessionRow; events: SessionEvent[] } }>('GET', `/v1/sessions/${id}`, undefined, { auth }),
+        api<{ data: ReviewHistoryRow[] }>('GET', `/v1/sessions/${id}/review`, undefined, { auth }),
       ]);
       setSession(d.data.session);
       setEvents(d.data.events);
       setHistory(h.data);
       setErr(null);
     } catch (e) {
-      setErr((e as Error).message);
+      if (!opts?.soft) setErr((e as Error).message);
     }
   }, [id]);
 
-  const loadEvidence = useCallback(async () => {
+  const loadEvidence = useCallback(async (opts?: { soft?: boolean }) => {
     try {
-      const r = await api<{ data: Evidence }>('GET', `/v1/sessions/${id}/evidence`);
+      const r = await api<{ data: Evidence }>(
+        'GET',
+        `/v1/sessions/${id}/evidence`,
+        undefined,
+        { auth: opts?.soft ? 'soft' : 'hard' }
+      );
       setEvidence(r.data);
     } catch (e) {
-      setErr((e as Error).message);
+      if (!opts?.soft) setErr((e as Error).message);
     }
   }, [id]);
 
@@ -119,17 +134,28 @@ export default function SessionDetailPage() {
     void loadEvidence();
   }, [loadCore, loadEvidence]);
 
-  const isLive = session ? ['active', 'paused'].includes(session.status) : false;
-  useEffect(() => {
-    if (!isLive) return;
-    const t = setInterval(() => void loadCore(), 5000);
-    return () => clearInterval(t);
-  }, [isLive, loadCore]);
+  /** Status still Active/Paused (may be a zombie). Used for UI chrome. */
+  const isLive = isSessionStatusLive(session);
+  /** Candidate actually connected with fresh heartbeat — drives fast polling. */
+  const present = isSessionPresent(session);
 
   useEffect(() => {
-    const t = setInterval(() => void loadEvidence(), ((evidence?.expires_in_seconds || 900) - 60) * 1000);
+    if (!isLive || !pageVisible) return;
+    const ms = present ? 5_000 : 60_000;
+    const t = setInterval(() => void loadCore({ soft: true }), ms);
     return () => clearInterval(t);
-  }, [evidence?.expires_in_seconds, loadEvidence]);
+  }, [isLive, present, pageVisible, loadCore]);
+
+  useEffect(() => {
+    if (!pageVisible) return;
+    const ttl = Math.max(60, (evidence?.expires_in_seconds || 900) - 60);
+    const t = setInterval(() => void loadEvidence({ soft: true }), ttl * 1000);
+    return () => clearInterval(t);
+  }, [evidence?.expires_in_seconds, loadEvidence, pageVisible]);
+
+  useEffect(() => {
+    setSnapPage(0);
+  }, [id, evidence?.snapshots?.length]);
 
   useEffect(() => {
     if (session?.review_decision) setDecision(session.review_decision);
@@ -146,6 +172,10 @@ export default function SessionDetailPage() {
   const hasRecording = Boolean(evidence?.recordings.some((r) => r.url));
   const active = violations.find((v) => v.id === activeEvent) || null;
   const activeSnap = active && evidence ? nearestSnapshot(evidence.snapshots, active.occurred_at) : null;
+  const allSnaps = evidence?.snapshots || [];
+  const snapPageCount = Math.max(1, Math.ceil(allSnaps.length / SNAPSHOT_PAGE_SIZE));
+  const safeSnapPage = Math.min(snapPage, snapPageCount - 1);
+  const pageSnaps = allSnaps.slice(safeSnapPage * SNAPSHOT_PAGE_SIZE, (safeSnapPage + 1) * SNAPSHOT_PAGE_SIZE);
 
   const flash = (m: string) => {
     setToast(m);
@@ -178,15 +208,33 @@ export default function SessionDetailPage() {
 
   const jump = (ev: SessionEvent) => {
     setActiveEvent(ev.id);
-    playerRef.current?.seekToInstant(ev.occurred_at);
+    // Defer one frame so the active-row paint cannot race the player seek,
+    // and prefer recording-relative offset (matches the 00:01 labels).
+    requestAnimationFrame(() => {
+      const offset = ev.offset_seconds;
+      if (offset != null && Number.isFinite(offset)) {
+        playerRef.current?.seekToOffset(offset);
+      } else if (ev.occurred_at) {
+        playerRef.current?.seekToInstant(ev.occurred_at);
+      }
+    });
   };
 
-  if (!session) {
-    return (
+  const Frame = ({ children }: { children: ReactNode }) =>
+    embed ? (
       <AuthGuard>
-        <TenantAdminShell>{err ? <Alert tone="danger">{err}</Alert> : <Spinner label="Loading session…" />}</TenantAdminShell>
+        <div className="session-embed" style={{ padding: 12, minHeight: 480 }}>
+          {children}
+        </div>
+      </AuthGuard>
+    ) : (
+      <AuthGuard>
+        <TenantAdminShell>{children}</TenantAdminShell>
       </AuthGuard>
     );
+
+  if (!session) {
+    return <Frame>{err ? <Alert tone="danger">{err}</Alert> : <Spinner label="Loading session…" />}</Frame>;
   }
 
   const meta = session.integration_metadata
@@ -194,14 +242,17 @@ export default function SessionDetailPage() {
     : [];
 
   return (
-    <AuthGuard>
-      <TenantAdminShell>
+    <Frame>
         <PageHeader
-          breadcrumbs={[
-            { href: '/sessions', label: 'Sessions' },
-            ...(session.exam_id ? [{ href: `/exams/${session.exam_id}`, label: session.exam_title }] : []),
-            { label: session.candidate_name },
-          ]}
+          breadcrumbs={
+            embed
+              ? undefined
+              : [
+                  { href: '/sessions', label: 'Sessions' },
+                  ...(session.exam_id ? [{ href: `/exams/${session.exam_id}`, label: session.exam_title }] : []),
+                  { label: session.candidate_name },
+                ]
+          }
           title={session.candidate_name}
           description={
             <>
@@ -267,7 +318,11 @@ export default function SessionDetailPage() {
             <div>
               <Card
                 title="Recording"
-                description={hasRecording ? 'Select a detection to jump to that moment.' : undefined}
+                description={
+                  hasRecording
+                    ? 'Camera (with mic voice) and screen play side-by-side. Select a detection to jump both to that moment.'
+                    : undefined
+                }
                 actions={
                   <Button size="sm" variant="ghost" icon="flag" onClick={() => setIncidentOpen(true)}>
                     Record incident
@@ -276,12 +331,45 @@ export default function SessionDetailPage() {
               >
                 {evidence ? (
                   hasRecording ? (
-                    <RecordingPlayer
-                      ref={playerRef}
-                      recordings={evidence.recordings}
-                      onUrlExpired={() => void loadEvidence()}
-                      onTime={(t) => (playheadRef.current = t)}
-                    />
+                    <>
+                      <RecordingPlayer
+                        ref={playerRef}
+                        recordings={evidence.recordings}
+                        onUrlExpired={() => void loadEvidence({ soft: true })}
+                        onTime={(t) => (playheadRef.current = t)}
+                      />
+                      {active && activeSnap?.url ? (
+                        <div
+                          style={{
+                            marginTop: 12,
+                            display: 'grid',
+                            gridTemplateColumns: '140px 1fr',
+                            gap: 12,
+                            alignItems: 'center',
+                            padding: 10,
+                            borderRadius: 10,
+                            border: '1px solid #e2e8f0',
+                            background: '#f8fafc',
+                          }}
+                        >
+                          <img
+                            src={activeSnap.url}
+                            alt="Nearest snapshot"
+                            style={{ width: 140, height: 100, objectFit: 'cover', borderRadius: 8 }}
+                          />
+                          <div style={{ minWidth: 0 }}>
+                            <strong style={{ fontSize: 13 }}>Nearest snapshot at detection</strong>
+                            <div className="ps-muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+                              {active.label} · {formatTime(activeSnap.captured_at)}
+                              {active.offset_seconds != null ? ` · ${formatOffset(active.offset_seconds)}` : ''}
+                            </div>
+                            <div className="ps-muted" style={{ fontSize: 12, marginTop: 4 }}>
+                              If the video does not jump (common for raw WebM), this frame is the closest evidence.
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
                   ) : activeSnap?.url ? (
                     <div>
                       <img src={activeSnap.url} alt="Snapshot near detection" style={{ width: '100%', borderRadius: 10 }} />
@@ -328,8 +416,10 @@ export default function SessionDetailPage() {
                         <div style={{ minWidth: 0 }}>
                           <div className="vt-label">{ev.label}</div>
                           <div className="vt-meta">
-                            <span className={`sev-${ev.severity}`}>● {SEVERITY_LABEL[ev.severity] || ev.severity}</span>
-                            <span>{SOURCE_LABEL[ev.source] || ev.source}</span>
+                            <SeverityBadge severity={ev.severity}>
+                              {SEVERITY_LABEL[ev.severity] || ev.severity}
+                            </SeverityBadge>
+                            <Badge tone="neutral">{SOURCE_LABEL[ev.source] || ev.source}</Badge>
                             <span>{formatTime(ev.occurred_at)}</span>
                             {ev.review_status !== 'open' && (
                               <Badge tone={ev.review_status === 'confirmed' ? 'danger' : 'neutral'}>
@@ -347,6 +437,7 @@ export default function SessionDetailPage() {
                               </Button>
                               <Button
                                 size="sm"
+                                variant="secondary"
                                 onClick={() => {
                                   setDismissing(ev);
                                   setDismissNote('');
@@ -450,24 +541,48 @@ export default function SessionDetailPage() {
                 ))}
               </DataTable>
             </Card>
-            <Card title={`Snapshots (${evidence?.snapshots.length || 0})`} description="Links are signed and expire after a few minutes; they refresh automatically.">
-              {!evidence?.snapshots.length ? (
+            <Card
+              title={`Snapshots (${allSnaps.length})`}
+              description="Links are signed and expire after a few minutes; they refresh automatically. Showing a page at a time to keep the browser stable."
+            >
+              {!allSnaps.length ? (
                 <EmptyState icon="image" title="No snapshots" />
               ) : (
-                <div className="snap-grid">
-                  {evidence.snapshots.map((s) => (
-                    <button key={s.id} type="button" className="snap-card" onClick={() => setLightbox(s)}>
-                      {s.url ? <img src={s.url} alt={s.caption || 'snapshot'} loading="lazy" /> : null}
-                      <div>
-                        <strong>{formatTime(s.captured_at)}</strong>
-                        {s.offset_seconds != null && <span className="ps-muted"> · {formatOffset(s.offset_seconds)}</span>}
-                        <div className="ps-muted" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {s.source === 'live_preview' ? 'Periodic frame' : s.caption || s.source}
+                <>
+                  <div className="snap-grid">
+                    {pageSnaps.map((s) => (
+                      <button key={s.id} type="button" className="snap-card" onClick={() => setLightbox(s)}>
+                        {s.url ? <img src={s.url} alt={s.caption || 'snapshot'} loading="lazy" decoding="async" /> : null}
+                        <div>
+                          <strong>{formatTime(s.captured_at)}</strong>
+                          {s.offset_seconds != null && <span className="ps-muted"> · {formatOffset(s.offset_seconds)}</span>}
+                          <div className="ps-muted" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {s.source === 'live_preview' ? 'Periodic frame' : s.caption || s.source}
+                          </div>
                         </div>
+                      </button>
+                    ))}
+                  </div>
+                  {snapPageCount > 1 ? (
+                    <div className="ps-row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 12 }}>
+                      <span className="ps-muted">
+                        Page {safeSnapPage + 1} of {snapPageCount} · {pageSnaps.length} shown
+                      </span>
+                      <div className="ps-row" style={{ gap: 8 }}>
+                        <Button size="sm" disabled={safeSnapPage <= 0} onClick={() => setSnapPage((p) => Math.max(0, p - 1))}>
+                          Previous
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={safeSnapPage >= snapPageCount - 1}
+                          onClick={() => setSnapPage((p) => Math.min(snapPageCount - 1, p + 1))}
+                        >
+                          Next
+                        </Button>
                       </div>
-                    </button>
-                  ))}
-                </div>
+                    </div>
+                  ) : null}
+                </>
               )}
             </Card>
           </>
@@ -487,7 +602,7 @@ export default function SessionDetailPage() {
                   </Td>
                   <Td>{SOURCE_LABEL[ev.source] || ev.source}</Td>
                   <Td>
-                    <span className={`sev-${ev.severity}`}>{SEVERITY_LABEL[ev.severity] || ev.severity}</span>
+                    <SeverityBadge severity={ev.severity}>{SEVERITY_LABEL[ev.severity] || ev.severity}</SeverityBadge>
                   </Td>
                   <Td>{ev.is_violation ? <StatusBadge status={ev.review_status === 'open' ? 'pending' : ev.review_status} label={ev.review_status} /> : <span className="ps-muted">—</span>}</Td>
                 </tr>
@@ -637,10 +752,11 @@ export default function SessionDetailPage() {
           )}
         </Modal>
 
-        <p className="ps-muted no-print" style={{ fontSize: 12, marginTop: 8 }}>
-          <Link href="/sessions">← Back to sessions</Link>
-        </p>
-      </TenantAdminShell>
-    </AuthGuard>
+        {!embed && (
+          <p className="ps-muted no-print" style={{ fontSize: 12, marginTop: 8 }}>
+            <Link href="/sessions">← Back to sessions</Link>
+          </p>
+        )}
+    </Frame>
   );
 }

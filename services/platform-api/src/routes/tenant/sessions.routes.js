@@ -9,6 +9,17 @@ import {
   assertSessionBelongs,
 } from '../../services/tenant/sessions.js';
 import { listSessionsEnriched, listLiveSessionsEnriched } from '../../services/tenant/sessionQueries.js';
+import {
+  getSessionTimeline,
+  getSessionEvidence,
+  buildIntegrityReport,
+  listReviewHistory,
+  startReview,
+  decideSession,
+  reviewEvent,
+  addReviewNote,
+  addManualIncident,
+} from '../../services/tenant/review.js';
 import { ingestLockdownEvents } from '../../services/lockdown/events.js';
 import { requireSebWhenStrict } from '../../middleware/sebIntegrity.js';
 import { presignMediaChunk, completeMediaChunk } from '../../services/media/chunkPresign.js';
@@ -26,6 +37,7 @@ import { listSessionRecordingsForPlayback } from '../../services/tenant/recordin
 import { bulkSessionActions } from '../../services/tenant/bulkSessions.js';
 import { problemDetails, ProblemTypes } from '../../utils/problemDetails.js';
 import { isUuid } from '../../utils/validation.js';
+import { requireSessionAccess } from '../../middleware/tenantPermissions.js';
 
 const router = Router();
 
@@ -117,6 +129,7 @@ router.get(
         sort: req.query.sort,
         highest_severity: req.query.highest_severity,
         min_risk: req.query.min_risk,
+        live_only: req.query.live_only,
       });
       res.json({ data: items, next_cursor, total });
     } catch {
@@ -129,6 +142,9 @@ router.get(
     }
   })
 );
+
+/** After collection routes so /live and /bulk are not treated as session ids. */
+router.use('/:id', requireSessionAccess());
 
 router.post(
   '/:id/lockdown-events',
@@ -167,28 +183,188 @@ router.post(
 router.get(
   '/:id',
   asyncHandler(async (req, res) => {
-    if (!isUuid(req.params.id)) {
-      return res.status(400).type('application/problem+json').json(
-        problemDetails({
-          type: ProblemTypes.validation,
-          title: 'Validation Error',
-          status: 400,
-          detail: 'Invalid session id',
-        })
-      );
+    if (!isUuid(req.params.id)) return badId(res);
+    try {
+      const timeline = await getSessionTimeline(req.tenantContext.tenantId, req.params.id);
+      if (!timeline) return notFound(res);
+      res.json({
+        data: {
+          session: timeline.session,
+          events: timeline.events,
+          recording_origin: timeline.recording_origin,
+        },
+      });
+    } catch {
+      const detail = await getSessionDetail(req.tenantContext.tenantId, req.params.id);
+      if (!detail) return notFound(res);
+      res.json({ data: detail });
     }
-    const detail = await getSessionDetail(req.tenantContext.tenantId, req.params.id);
-    if (!detail) {
-      return res.status(404).type('application/problem+json').json(
-        problemDetails({
-          type: ProblemTypes.notFound,
-          title: 'Not Found',
-          status: 404,
-          detail: 'Session not found',
-        })
-      );
+  })
+);
+
+router.get(
+  '/:id/evidence',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const data = await getSessionEvidence(req.tenantContext.tenantId, req.params.id);
+    if (!data) return notFound(res);
+    res.json({ data });
+  })
+);
+
+router.get(
+  '/:id/integrity-report',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const data = await buildIntegrityReport(req.tenantContext.tenantId, req.params.id);
+    if (!data) return notFound(res);
+    res.json({ data });
+  })
+);
+
+router.get(
+  '/:id/integrity-report.pdf',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const { renderSessionIntegrityPdf } = await import('../../services/exports/sessionIntegrityPdf.js');
+    const buf = await renderSessionIntegrityPdf(req.tenantContext.tenantId, req.params.id);
+    if (!buf) return notFound(res);
+    const name = `integrity-report-${req.params.id.slice(0, 8)}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    res.setHeader('Content-Length', String(buf.length));
+    res.send(buf);
+  })
+);
+
+router.get(
+  '/:id/review',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    const ok = await assertSessionBelongs(req.tenantContext.tenantId, req.params.id);
+    if (!ok) return notFound(res);
+    const data = await listReviewHistory(req.tenantContext.tenantId, req.params.id);
+    res.json({ data });
+  })
+);
+
+router.post(
+  '/:id/review/start',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    try {
+      const data = await startReview(req.tenantContext.tenantId, req.params.id, actorFromCtx(req.tenantContext));
+      res.json({ data });
+    } catch (e) {
+      if (e.status === 404) return notFound(res);
+      throw e;
     }
-    res.json({ data: detail });
+  })
+);
+
+router.post(
+  '/:id/review/decision',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    try {
+      const data = await decideSession(
+        req.tenantContext.tenantId,
+        req.params.id,
+        req.body || {},
+        actorFromCtx(req.tenantContext)
+      );
+      res.json({ data });
+    } catch (e) {
+      if (e.status === 404) return notFound(res);
+      if (e.status === 422) {
+        return res.status(422).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 422, detail: e.message })
+        );
+      }
+      throw e;
+    }
+  })
+);
+
+router.post(
+  '/:id/review/notes',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    try {
+      const data = await addReviewNote(
+        req.tenantContext.tenantId,
+        req.params.id,
+        req.body || {},
+        actorFromCtx(req.tenantContext)
+      );
+      res.status(201).json({ data });
+    } catch (e) {
+      if (e.status === 404) return notFound(res);
+      if (e.status === 422) {
+        return res.status(422).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 422, detail: e.message })
+        );
+      }
+      throw e;
+    }
+  })
+);
+
+router.post(
+  '/:id/events/:eventId/review',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    try {
+      const data = await reviewEvent(
+        req.tenantContext.tenantId,
+        req.params.id,
+        req.params.eventId,
+        req.body || {},
+        actorFromCtx(req.tenantContext)
+      );
+      res.json({ data });
+    } catch (e) {
+      if (e.status === 404) {
+        return res.status(404).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.notFound, title: 'Not Found', status: 404, detail: e.message })
+        );
+      }
+      if (e.status === 400 || e.status === 422) {
+        return res.status(e.status).type('application/problem+json').json(
+          problemDetails({
+            type: e.status === 422 ? ProblemTypes.validation : ProblemTypes.validation,
+            title: 'Validation Error',
+            status: e.status,
+            detail: e.message,
+          })
+        );
+      }
+      throw e;
+    }
+  })
+);
+
+router.post(
+  '/:id/incidents',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    try {
+      const data = await addManualIncident(
+        req.tenantContext.tenantId,
+        req.params.id,
+        req.body || {},
+        actorFromCtx(req.tenantContext)
+      );
+      res.status(201).json({ data });
+    } catch (e) {
+      if (e.status === 404) return notFound(res);
+      if (e.status === 422) {
+        return res.status(422).type('application/problem+json').json(
+          problemDetails({ type: ProblemTypes.validation, title: 'Validation Error', status: 422, detail: e.message })
+        );
+      }
+      throw e;
+    }
   })
 );
 

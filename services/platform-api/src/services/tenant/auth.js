@@ -24,13 +24,21 @@ function sessionPayload(user) {
     sub: user.id,
     email: user.email,
     tenant_id: user.tenant_id,
+    role: user.role || 'admin',
+    permissions: user.permissions || undefined,
   });
   return {
     access_token,
     token_type: 'Bearer',
     expires_in: process.env.JWT_EXPIRES_IN || '8h',
     tenant: { id: user.tenant_id, slug: user.slug },
-    user: { id: user.id, email: user.email, display_name: user.display_name, role: user.role },
+    user: {
+      id: user.id,
+      email: user.email,
+      display_name: user.display_name,
+      role: user.role,
+      permissions: user.permissions || null,
+    },
   };
 }
 
@@ -137,7 +145,7 @@ export async function loginTenantAdmin({ tenant_slug, email, password }) {
     throw fail(422, 'tenant_slug, email, and password are required');
   }
   const { rows } = await query(
-    `SELECT tu.id, tu.tenant_id, tu.email, tu.password_hash, tu.display_name, tu.role,
+    `SELECT tu.id, tu.tenant_id, tu.email, tu.password_hash, tu.display_name, tu.role, tu.permissions,
             tu.status AS user_status, t.slug, t.status AS tenant_status
        FROM tenant_users tu
        JOIN tenants t ON t.id = tu.tenant_id
@@ -156,6 +164,7 @@ export async function loginTenantAdmin({ tenant_slug, email, password }) {
   }
   const ok = await bcrypt.compare(String(password), user.password_hash);
   if (!ok) throw fail(401, 'Invalid credentials');
+  await query(`UPDATE tenant_users SET last_active_at = now() WHERE id = $1`, [user.id]).catch(() => {});
   return sessionPayload(user);
 }
 
@@ -184,7 +193,7 @@ export async function acceptInvite({ token, password, display_name }) {
             activated_at = COALESCE(activated_at, now()),
             updated_at = now()
       WHERE id = $3
-      RETURNING id, tenant_id, email, display_name, role`,
+      RETURNING id, tenant_id, email, display_name, role, permissions`,
     [passwordHash, name, row.id]
   );
   await query(`UPDATE tenant_auth_tokens SET used_at = now() WHERE id = $1`, [row.token_id]);

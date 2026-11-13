@@ -91,7 +91,7 @@ export function ExamFormModal({
       open={open}
       onClose={onClose}
       title={exam ? 'Edit exam' : 'New exam'}
-      description="An exam groups proctoring sessions. Attach a policy so AI modules and thresholds apply to every attempt."
+      description="An exam groups proctoring sessions. Super Admin’s assigned services run on every attempt."
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
@@ -124,23 +124,16 @@ export function ExamFormModal({
           ))}
         </select>
       </Field>
-      <Field label="Proctoring policy" hint="Resolved into each new session’s ai_config snapshot (immutable per attempt).">
-        <select value={policyId} onChange={(e) => setPolicyId(e.target.value)}>
-          <option value="">Tenant default / platform defaults</option>
-          {policies.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-              {p.is_default ? ' (default)' : ''}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {selectedPolicy && (
-        <Alert tone="info" title="Policy attached">
-          New Integration/SDK sessions for this exam will enforce <strong>{selectedPolicy.name}</strong> modules,
-          sensitivity, grace and severity thresholds.
-        </Alert>
-      )}
+      <Alert tone="info" title="Proctoring services">
+        {selectedPolicy ? (
+          <>
+            Default pack <strong>{selectedPolicy.name}</strong> is linked automatically. Active modules always follow
+            Super Admin’s allow-list.
+          </>
+        ) : (
+          <>Sessions use your organization’s Super Admin–assigned services (no pack picker needed).</>
+        )}
+      </Alert>
     </Modal>
   );
 }

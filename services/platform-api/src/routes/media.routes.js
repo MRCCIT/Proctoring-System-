@@ -241,17 +241,23 @@ export function registerMediaRoutes(app) {
       }
       try {
         const row = await resolveSessionReportRequest(String(token));
-        res.json({
-          data: {
-            session_id: row.id,
-            exam_title: row.exam_title,
-            status: row.status,
-            violation_flags: row.violation_flags,
-            external_ref: row.external_ref,
-            pdf_ready: false,
-            note: 'Replace with generated PDF bytes or redirect to object storage.',
-          },
-        });
+        const { renderSessionIntegrityPdf } = await import('../services/exports/sessionIntegrityPdf.js');
+        const buf = await renderSessionIntegrityPdf(row.tenant_id, row.id);
+        if (!buf) {
+          return res.status(404).type('application/problem+json').json(
+            problemDetails({
+              type: ProblemTypes.notFound,
+              title: 'Not Found',
+              status: 404,
+              detail: 'Session report could not be generated.',
+            })
+          );
+        }
+        const name = `integrity-report-${String(row.id).slice(0, 8)}.pdf`;
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+        res.setHeader('Content-Length', String(buf.length));
+        return res.send(buf);
       } catch (e) {
         if (e.status === 401 || e.status === 404) {
           return res.status(e.status).type('application/problem+json').json(

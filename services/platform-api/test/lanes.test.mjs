@@ -8,8 +8,12 @@ test('P0 answer-save never deferred at L4', () => {
   assert.equal(d.allow, true);
 });
 
-test('exports deferred at high load', () => {
-  const d = laneDecision('export.csv', { loadLevel: 'L3' });
+test('exports deferred only at severe load (L4 by default)', () => {
+  const mid = laneDecision('export.csv', { loadLevel: 'L3' });
+  assert.equal(mid.lane, 'P2');
+  assert.equal(mid.deferred, false);
+
+  const d = laneDecision('export.csv', { loadLevel: 'L4' });
   assert.equal(d.lane, 'P2');
   assert.equal(d.deferred, true);
 });

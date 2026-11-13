@@ -1,24 +1,30 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import {
-  Badge,
+  Alert,
   Button,
   Card,
   DataTable,
   EmptyState,
   PageHeader,
   SearchInput,
+  SeverityBadge,
   Spinner,
   StatCard,
+  StatusBadge,
+  TablePagination,
   Td,
   Toolbar,
+  useClientPagination,
 } from '@proctorshield/ui-components';
 import { AuthGuard } from '@/components/AuthGuard';
 import { TenantAdminShell } from '@/components/TenantAdminShell';
+import { ReviewBadge } from '@/components/SessionsTable';
 import { api, qs } from '@/lib/tenantApi';
-import { formatDateTime } from '@/lib/format';
+import { downloadExportFile } from '@/lib/exportDownload';
+import { decisionLabel, formatDateTime } from '@/lib/format';
 
 interface ReportSummary {
   total_candidates?: number;
@@ -42,6 +48,7 @@ interface SevereRow {
   violation_count?: number;
   review_decision?: string | null;
   review_status?: string;
+  status?: string;
 }
 
 interface CandidateRow {
@@ -76,6 +83,8 @@ interface ExamReportPayload {
   candidates?: { items: CandidateRow[]; next_cursor?: string | null; total?: number };
 }
 
+type ExportKind = 'csv' | 'xlsx' | 'pdf';
+
 const REVIEW_OPTIONS = [
   { value: '', label: 'Any review' },
   { value: 'pending', label: 'Pending' },
@@ -91,104 +100,166 @@ const SEVERITY_OPTIONS = [
   { value: 'LOW', label: 'Low' },
 ];
 
+const EXPORT_ACTIONS: Array<{ kind: ExportKind; label: string }> = [
+  { kind: 'csv', label: 'CSV' },
+  { kind: 'xlsx', label: 'Excel' },
+  { kind: 'pdf', label: 'PDF' },
+];
+
 export default function ExamReportPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const [report, setReport] = useState<ExamReportPayload | null>(null);
-  const [jobs, setJobs] = useState<ExportJob[]>([]);
   const [err, setErr] = useState('');
-  const [exporting, setExporting] = useState(false);
+  const [exportingKind, setExportingKind] = useState<ExportKind | null>(null);
   const [q, setQ] = useState('');
   const [review, setReview] = useState('');
   const [severity, setSeverity] = useState('');
   const [violationType, setViolationType] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [applied, setApplied] = useState({
+    q: '',
+    review: '',
+    severity: '',
+    violationType: '',
+    from: '',
+    to: '',
+  });
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
-  const [candidateCursor, setCandidateCursor] = useState<string | null>(null);
   const [candidateTotal, setCandidateTotal] = useState<number | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const pager = useClientPagination(candidates, 10);
+
+  const filterParams = useMemo(
+    () => ({
+      q: applied.q || undefined,
+      review_status: applied.review || undefined,
+      severity: applied.severity || undefined,
+      violation_type: applied.violationType || undefined,
+      from: applied.from || undefined,
+      to: applied.to || undefined,
+    }),
+    [applied]
+  );
+
+  const filtersActive = Boolean(q || review || severity || violationType || from || to || Object.values(applied).some(Boolean));
 
   const load = useCallback(
-    async (opts?: { appendCandidates?: boolean; cursor?: string | null }) => {
-      const append = Boolean(opts?.appendCandidates && opts.cursor);
+    async (opts?: { silent?: boolean; filters?: typeof filterParams }) => {
+      const filters = opts?.filters || filterParams;
       try {
-        if (!append) setLoading(true);
+        if (!opts?.silent) setLoading(true);
         const join = qs({
-          q: q || undefined,
-          review_status: review || undefined,
-          severity: severity || undefined,
-          violation_type: violationType || undefined,
-          from: from || undefined,
-          to: to || undefined,
-          candidate_limit: 25,
-          candidate_cursor: append ? opts?.cursor : undefined,
+          ...filters,
+          candidate_limit: 100,
         });
-        const r = await api<{ data: ExamReportPayload }>('GET', `/v1/exams/${id}/report${join}`);
+        const r = await api<{ data: ExamReportPayload }>(
+          'GET',
+          `/v1/exams/${id}/report${join}`,
+          undefined,
+          { auth: opts?.silent ? 'soft' : 'hard' }
+        );
         setReport(r.data);
-        if (append) {
-          setCandidates((prev) => [...prev, ...(r.data.candidates?.items || [])]);
-        } else {
-          setCandidates(r.data.candidates?.items || []);
-        }
-        setCandidateCursor(r.data.candidates?.next_cursor || null);
+        setCandidates(r.data.candidates?.items || []);
         setCandidateTotal(r.data.candidates?.total ?? null);
-        setErr('');
+        if (!exportingKind) setErr('');
       } catch (e) {
-        setErr((e as Error).message);
+        if (!exportingKind && !opts?.silent) setErr((e as Error).message);
       } finally {
         setLoading(false);
-        setLoadingMore(false);
-      }
-      try {
-        const j = await api<{ data: ExportJob[] }>('GET', `/v1/exams/${id}/exports`);
-        setJobs(j.data || []);
-      } catch {
-        /* exports optional */
       }
     },
-    [id, q, review, severity, violationType, from, to]
+    [id, filterParams, exportingKind]
   );
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 8_000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload when exam or applied filters change
+  }, [id, applied]);
+
+  useEffect(() => {
+    if (exportingKind) return;
+    const tick = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void load({ silent: true });
+    };
+    const t = setInterval(tick, 20_000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, exportingKind]);
 
-  const applyFilters = () => void load();
-
-  const loadMoreCandidates = async () => {
-    if (!candidateCursor) return;
-    setLoadingMore(true);
-    await load({ appendCandidates: true, cursor: candidateCursor });
+  const applyFilters = () => {
+    setApplied({ q, review, severity, violationType, from, to });
   };
 
-  const startExport = async (kind: 'csv' | 'xlsx' | 'pdf') => {
-    setExporting(true);
+  const clearFilters = () => {
+    setQ('');
+    setReview('');
+    setSeverity('');
+    setViolationType('');
+    setFrom('');
+    setTo('');
+    setApplied({ q: '', review: '', severity: '', violationType: '', from: '', to: '' });
+  };
+
+  const startExport = async (kind: ExportKind) => {
+    if (exportingKind) return;
+    if (typeof document !== 'undefined') (document.activeElement as HTMLElement | null)?.blur?.();
+    setExportingKind(kind);
+    setErr('');
     try {
-      await api('POST', `/v1/exams/${id}/exports`, {
+      const created = await api<{ data: ExportJob }>('POST', `/v1/exams/${id}/exports`, {
         kind,
         scope: 'all',
         filters: {
-          q: q || undefined,
-          review_status: review || undefined,
-          highest_severity: severity || undefined,
-          violation_type: violationType || undefined,
-          from: from || undefined,
-          to: to || undefined,
+          q: filterParams.q,
+          review_status: filterParams.review_status,
+          highest_severity: filterParams.severity,
+          violation_type: filterParams.violation_type,
+          from: filterParams.from,
+          to: filterParams.to,
         },
       });
-      await load();
+      const jobId = created.data?.id;
+      if (!jobId) throw new Error('Export job was not created');
+
+      let final: ExportJob | null = null;
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const polled = await api<{ data: ExportJob }>('GET', `/v1/exams/${id}/exports/${jobId}`);
+        final = polled.data;
+        if (polled.data.status === 'done') break;
+        if (polled.data.status === 'failed') {
+          throw new Error(polled.data.error || 'Export failed');
+        }
+      }
+
+      if (!final || final.status !== 'done') {
+        throw new Error('Export timed out. Try again in a moment.');
+      }
+
+      await downloadExportFile(id, jobId, kind);
+      await load({ silent: true });
     } catch (e) {
-      setErr((e as Error).message);
+      const msg = (e as Error).message || 'Export failed';
+      if (msg === 'Failed to fetch') {
+        setErr('Could not reach the API for export. Check that platform-api is running and reachable.');
+      } else if (/deferred under load/i.test(msg)) {
+        setErr(
+          `${msg} Tip: Super Admin → Infrastructure → System controls → set load to L0–L3, then retry PDF/CSV/Excel.`
+        );
+      } else {
+        setErr(msg);
+      }
     } finally {
-      setExporting(false);
+      setExportingKind(null);
     }
   };
 
   const summary = report?.summary || {};
   const title = report?.exam?.title || 'Exam report';
+  const severityMax = Math.max(1, ...(report?.violations_by_severity || []).map((v) => Number(v.count || 0)));
+  const typeMax = Math.max(1, ...(report?.violations_by_type || []).map((v) => Number(v.count || 0)));
 
   return (
     <AuthGuard>
@@ -199,34 +270,74 @@ export default function ExamReportPage() {
             { href: `/exams/${id}`, label: title },
             { label: 'Report' },
           ]}
-          title="Cumulative exam report"
-          description="Summary, severe offenders, and async exports. Huge exams: full candidate lists go to Excel/CSV; PDF is summary + flagged only."
+          title={title}
+          description="Integrity summary for this exam — exports download when ready."
           actions={
             <>
               <Button href={`/exams/${id}`} icon="chevronLeft">
                 Exam
               </Button>
               <Button href={`/live/exams/${id}/candidates`} icon="live">
-                Live workspace
+                Live
               </Button>
-              <Button variant="primary" icon="download" loading={exporting} onClick={() => void startExport('csv')}>
-                Export CSV
-              </Button>
-              <Button icon="download" loading={exporting} onClick={() => void startExport('xlsx')}>
-                Excel
-              </Button>
-              <Button icon="download" loading={exporting} onClick={() => void startExport('pdf')}>
-                PDF
-              </Button>
+              <span className="ps-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                {EXPORT_ACTIONS.map(({ kind, label }) => (
+                  <Button
+                    key={kind}
+                    icon="download"
+                    loading={exportingKind === kind}
+                    disabled={Boolean(exportingKind) && exportingKind !== kind}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => void startExport(kind)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </span>
             </>
           }
         />
-        {err && <p className="error">{err}</p>}
+
+        {err ? (
+          <Alert tone="danger" title="Something went wrong">
+            {err}
+          </Alert>
+        ) : null}
+
+        {exportingKind ? (
+          <Alert tone="info" title={`Preparing ${exportingKind.toUpperCase()}…`}>
+            Stay on this page — download starts automatically when the file is ready.
+          </Alert>
+        ) : null}
+
         {loading && !report ? (
           <Spinner label="Loading report…" />
         ) : (
           <>
-            <Card title="Filters" description="Apply to severe list, violation breakdown, and paginated candidates." style={{ marginBottom: 16 }}>
+            <div className="ps-stats">
+              <StatCard label="Candidates" value={summary.total_candidates ?? '—'} />
+              <StatCard label="Appeared" value={summary.appeared ?? '—'} />
+              <StatCard label="Absent" value={summary.absent ?? '—'} />
+              <StatCard label="Submitted" value={summary.submitted ?? '—'} />
+              <StatCard label="Terminated" value={summary.terminated ?? '—'} tone={summary.terminated ? 'warning' : 'default'} />
+              <StatCard label="Violations" value={summary.total_violations ?? '—'} />
+              <StatCard
+                label="Avg risk"
+                value={summary.avg_risk_score != null ? Math.round(Number(summary.avg_risk_score)) : '—'}
+              />
+              <StatCard
+                label="Review pending"
+                value={summary.review_pending ?? '—'}
+                tone={summary.review_pending ? 'warning' : 'default'}
+              />
+              <StatCard
+                label="Critical"
+                value={summary.critical_violation_count ?? '—'}
+                tone={summary.critical_violation_count ? 'danger' : 'default'}
+              />
+            </div>
+
+            <Card title="Filters" description="Narrow severe cases, violation breakdown, and candidates." style={{ marginBottom: 16 }}>
               <Toolbar>
                 <SearchInput value={q} onChange={setQ} placeholder="Search candidate name or email" />
                 <label className="ps-field">
@@ -267,62 +378,71 @@ export default function ExamReportPage() {
                   <span className="ps-muted">To</span>
                   <input className="ps-input" type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} aria-label="To date" />
                 </label>
-                <Button variant="primary" onClick={() => void applyFilters()}>
+                <span className="ps-toolbar-spacer" />
+                {filtersActive ? <Button onClick={clearFilters}>Clear</Button> : null}
+                <Button variant="primary" onClick={applyFilters}>
                   Apply
                 </Button>
               </Toolbar>
             </Card>
 
-            <div className="ps-stats">
-              <StatCard label="Candidates" value={summary.total_candidates ?? '—'} />
-              <StatCard label="Appeared" value={summary.appeared ?? '—'} />
-              <StatCard label="Submitted" value={summary.submitted ?? '—'} />
-              <StatCard label="Terminated" value={summary.terminated ?? '—'} tone={summary.terminated ? 'warning' : 'default'} />
-              <StatCard label="Violations" value={summary.total_violations ?? '—'} />
-              <StatCard
-                label="Avg risk"
-                value={summary.avg_risk_score != null ? Math.round(Number(summary.avg_risk_score)) : '—'}
-              />
-              <StatCard label="Review pending" value={summary.review_pending ?? '—'} tone={summary.review_pending ? 'warning' : 'default'} />
-              <StatCard label="Critical" value={summary.critical_violation_count ?? '—'} tone={summary.critical_violation_count ? 'danger' : 'default'} />
-            </div>
-
-            <div className="ps-grid ps-grid-main" style={{ marginTop: 16 }}>
-              <Card title="Severe offenders" description="CRITICAL / HIGH risk candidates ranked by risk score.">
+            <div className="ps-grid ps-grid-main" style={{ marginTop: 4 }}>
+              <Card title="Severe offenders" description="Highest-risk candidates for review.">
                 <DataTable
                   headers={['Candidate', 'Risk', 'Severity', 'Violations', 'Decision']}
                   isEmpty={!report?.severe_offenders?.length}
                   empty={<EmptyState icon="flag" title="No severe cases" description="No CRITICAL/HIGH offenders match these filters." />}
                 >
                   {(report?.severe_offenders || []).map((r) => (
-                    <tr key={r.id} className="ps-row-link" onClick={() => (window.location.href = `/sessions/${r.id}`)}>
+                    <tr key={r.id} className="ps-row-link" onClick={() => router.push(`/sessions/${r.id}`)}>
                       <Td>
                         <div className="ps-cell-primary">{r.candidate_name || r.id.slice(0, 8)}</div>
                       </Td>
-                      <Td>{r.risk_score != null ? Math.round(Number(r.risk_score)) : '—'}</Td>
+                      <Td nowrap>{r.risk_score != null ? Math.round(Number(r.risk_score)) : '—'}</Td>
                       <Td>
-                        <Badge tone="danger">{r.highest_severity || '—'}</Badge>
+                        <SeverityBadge severity={r.highest_severity} />
                       </Td>
                       <Td>{r.violation_count ?? 0}</Td>
-                      <Td>{r.review_decision || '—'}</Td>
+                      <Td>{decisionLabel(r.review_decision) || '—'}</Td>
                     </tr>
                   ))}
                 </DataTable>
               </Card>
 
-              <Card title="Violations by severity">
+              <Card title="Violations by severity" description="Share of detections in this filter set.">
                 {!report?.violations_by_severity?.length ? (
                   <EmptyState icon="info" title="No violations" description="No violation events match these filters." />
                 ) : (
-                  <div className="ps-stack">
-                    {report.violations_by_severity.map((v) => (
-                      <div key={v.severity} className="ps-between">
-                        <Badge tone={v.severity === 'critical' ? 'danger' : v.severity === 'flag' ? 'warning' : 'neutral'}>
-                          {v.severity}
-                        </Badge>
-                        <strong>{v.count}</strong>
-                      </div>
-                    ))}
+                  <div className="ps-stack" style={{ gap: 12 }}>
+                    {report.violations_by_severity.map((v) => {
+                      const pct = Math.round((100 * Number(v.count || 0)) / severityMax);
+                      return (
+                        <div key={v.severity} className="ps-stack" style={{ gap: 6 }}>
+                          <div className="ps-between">
+                            <SeverityBadge severity={v.severity} />
+                            <strong>{v.count}</strong>
+                          </div>
+                          <div
+                            aria-hidden
+                            style={{
+                              height: 6,
+                              borderRadius: 999,
+                              background: 'var(--ps-border)',
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${pct}%`,
+                                height: '100%',
+                                borderRadius: 999,
+                                background: 'var(--ps-brand)',
+                              }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </Card>
@@ -330,85 +450,90 @@ export default function ExamReportPage() {
 
             <Card
               title="Candidates"
-              description={candidateTotal != null ? `${candidateTotal} matching sessions (cursor-paged).` : 'Filtered candidate sessions.'}
+              description={
+                candidateTotal != null
+                  ? `${candidateTotal.toLocaleString()} matching session${candidateTotal === 1 ? '' : 's'}${
+                      candidateTotal > candidates.length
+                        ? ` · showing first ${candidates.length} here; export CSV/Excel for the full list`
+                        : ''
+                    }`
+                  : 'Filtered candidate sessions'
+              }
               style={{ marginTop: 16 }}
             >
               <DataTable
                 headers={['Candidate', 'Status', 'Review', 'Risk', 'Severity', 'Violations', 'Created']}
-                isEmpty={!candidates.length}
+                isEmpty={!pager.pageItems.length}
                 empty={<EmptyState icon="users" title="No candidates" description="No sessions match the current filters." />}
               >
-                {candidates.map((r) => (
-                  <tr key={r.id} className="ps-row-link" onClick={() => (window.location.href = `/sessions/${r.id}`)}>
+                {pager.pageItems.map((r) => (
+                  <tr key={r.id} className="ps-row-link" onClick={() => router.push(`/sessions/${r.id}`)}>
                     <Td>
                       <div className="ps-cell-primary">{r.candidate_name || r.id.slice(0, 8)}</div>
                       {r.candidate_email ? <div className="ps-muted">{r.candidate_email}</div> : null}
                     </Td>
-                    <Td>{r.status || '—'}</Td>
-                    <Td>{r.review_status || '—'}</Td>
-                    <Td>{r.risk_score != null ? Math.round(Number(r.risk_score)) : '—'}</Td>
-                    <Td>{r.highest_severity || '—'}</Td>
+                    <Td>{r.status ? <StatusBadge status={r.status} /> : '—'}</Td>
+                    <Td>
+                      <ReviewBadge
+                        row={{
+                          review_status: (r.review_status as 'pending' | 'in_review' | 'reviewed') || 'pending',
+                          review_decision: (r.review_decision as 'cleared' | 'flagged' | 'inconclusive' | null) || null,
+                          status: r.status || 'completed',
+                        }}
+                      />
+                    </Td>
+                    <Td nowrap>{r.risk_score != null ? Math.round(Number(r.risk_score)) : '—'}</Td>
+                    <Td>{r.highest_severity ? <SeverityBadge severity={r.highest_severity} /> : '—'}</Td>
                     <Td>{r.violation_count ?? 0}</Td>
-                    <Td muted>{formatDateTime(r.created_at)}</Td>
+                    <Td muted nowrap>
+                      {formatDateTime(r.created_at)}
+                    </Td>
                   </tr>
                 ))}
               </DataTable>
-              {candidateCursor ? (
-                <div style={{ marginTop: 12 }}>
-                  <Button size="sm" loading={loadingMore} onClick={() => void loadMoreCandidates()}>
-                    Load more
-                  </Button>
-                </div>
-              ) : null}
-            </Card>
-
-            <Card title="Export jobs" description="Async jobs; download when status is done." style={{ marginTop: 16 }}>
-              {!jobs.length ? (
-                <EmptyState icon="download" title="No exports yet" description="Start CSV / Excel / PDF above." />
-              ) : (
-                <DataTable headers={['Kind', 'Status', 'Progress', 'Created', '']}>
-                  {jobs.map((j) => (
-                    <tr key={j.id}>
-                      <Td>{j.kind}</Td>
-                      <Td>
-                        <Badge
-                          tone={
-                            j.status === 'done' ? 'success' : j.status === 'failed' ? 'danger' : j.status === 'running' ? 'info' : 'neutral'
-                          }
-                        >
-                          {j.status}
-                        </Badge>
-                      </Td>
-                      <Td>{j.progress != null ? `${j.progress}%` : '—'}</Td>
-                      <Td muted>{formatDateTime(j.created_at)}</Td>
-                      <Td>
-                        {j.status === 'done' ? (
-                          <Button
-                            size="sm"
-                            href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/v1/exams/${id}/exports/${j.id}/download`}
-                            icon="download"
-                          >
-                            Download
-                          </Button>
-                        ) : j.error ? (
-                          <span className="ps-muted">{j.error}</span>
-                        ) : null}
-                      </Td>
-                    </tr>
-                  ))}
-                </DataTable>
-              )}
+              <TablePagination
+                page={pager.page}
+                pageSize={pager.pageSize}
+                total={pager.total}
+                pageCount={pager.pageCount}
+                onPageChange={pager.setPage}
+                onPageSizeChange={pager.setPageSize}
+              />
             </Card>
 
             {(report?.violations_by_type?.length || 0) > 0 && (
               <Card title="Violations by type" style={{ marginTop: 16 }}>
-                <div className="ps-stack">
-                  {report!.violations_by_type!.map((v) => (
-                    <div key={v.code} className="ps-between">
-                      <span>{v.code}</span>
-                      <strong>{v.count}</strong>
-                    </div>
-                  ))}
+                <div className="ps-stack" style={{ gap: 10 }}>
+                  {report!.violations_by_type!.map((v) => {
+                    const pct = Math.round((100 * Number(v.count || 0)) / typeMax);
+                    return (
+                      <div key={v.code} className="ps-stack" style={{ gap: 4 }}>
+                        <div className="ps-between">
+                          <span>{v.code}</span>
+                          <strong>{v.count}</strong>
+                        </div>
+                        <div
+                          aria-hidden
+                          style={{
+                            height: 4,
+                            borderRadius: 999,
+                            background: 'var(--ps-border)',
+                            overflow: 'hidden',
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: `${pct}%`,
+                              height: '100%',
+                              borderRadius: 999,
+                              background: 'var(--ps-brand)',
+                              opacity: 0.75,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </Card>
             )}

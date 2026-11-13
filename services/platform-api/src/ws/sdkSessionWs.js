@@ -17,10 +17,23 @@ async function authenticateSdkWs(request, sessionIdFromPath) {
   if (bearer) {
     try {
       const decoded = verifyTenantAdminToken(bearer);
-      if (decoded.role !== 'tenant_admin' || !decoded.tenant_id) return null;
+      const okRoles = new Set(['tenant_admin', 'admin', 'sub_admin', 'proctor', 'viewer']);
+      if (!okRoles.has(decoded.role) || !decoded.tenant_id) return null;
       const row = await assertSessionForTenant(decoded.tenant_id, sessionIdFromPath);
       if (!row) return null;
-      return { tenantId: decoded.tenant_id, sessionId: sessionIdFromPath, role: 'proctor', userId: decoded.sub };
+      const dbRole = decoded.role === 'tenant_admin' ? 'admin' : decoded.role;
+      if (dbRole === 'proctor' || dbRole === 'viewer') {
+        const { proctorOwnsSession } = await import('../middleware/tenantPermissions.js');
+        const owns = await proctorOwnsSession(decoded.tenant_id, decoded.sub, dbRole, sessionIdFromPath);
+        if (!owns) return null;
+      }
+      return {
+        tenantId: decoded.tenant_id,
+        sessionId: sessionIdFromPath,
+        role: 'proctor',
+        userId: decoded.sub,
+        tenantRole: dbRole,
+      };
     } catch {
       return null;
     }

@@ -26,12 +26,16 @@ export function clearReferenceCache(sessionId) {
  */
 async function loadSessionModules(tenantId, sessionId) {
   const { query } = await import('../../config/database.js');
+  const { clipAiModules, getTenantFeatureFlags } = await import('../tenant/aiFeatureAllowList.js');
   const { rows } = await query(
     `SELECT ai_config FROM exam_sessions WHERE id = $1 AND tenant_id = $2`,
     [sessionId, tenantId]
   );
   const modules = rows[0]?.ai_config?.ai_modules;
-  return modules && typeof modules === 'object' ? modules : {};
+  const base = modules && typeof modules === 'object' ? modules : {};
+  const flags = await getTenantFeatureFlags(query, tenantId);
+  // SA allow-list updates apply mid-session (continuous)
+  return clipAiModules(base, flags);
 }
 
 export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, options = {}) {
@@ -66,7 +70,7 @@ export async function runUnifiedProctorTick(tenantId, sessionId, imageDataUrl, o
     identity_mismatch_streak: state.identityMismatchStreak,
     tick_index: tickIndex,
     run_identity: Boolean(options.run_identity) && moduleOn('face_detection'),
-    run_phone: options.run_phone !== false && moduleOn('object_detection'),
+    run_phone: options.run_phone !== false && (moduleOn('phone_detection') || moduleOn('object_detection')),
     run_electronics: options.run_electronics === true && moduleOn('object_detection'),
     run_deep_gaze: deepGaze,
     modules,

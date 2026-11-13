@@ -273,6 +273,20 @@ export default function TenantDetailPage() {
           }
           actions={
             <>
+              <Button
+                variant="primary"
+                icon="external"
+                loading={busy === 'Open portal'}
+                disabled={!tenant || tenant.status === 'suspended'}
+                onClick={() =>
+                  void run('Open portal', async () => {
+                    const r = await getClient().impersonateTenant(id);
+                    window.open(r.data.handoff_url, '_blank', 'noopener,noreferrer');
+                  })
+                }
+              >
+                Open tenant portal
+              </Button>
               <Button href="/analytics" icon="chart">
                 Compare tenants
               </Button>
@@ -338,6 +352,29 @@ export default function TenantDetailPage() {
             </div>
           </Alert>
         )}
+
+        {tenant?.status === 'active' ? (
+          <Card
+            title="Tenant admin console"
+            description="Open this organization’s admin portal as a platform super admin (audited, short-lived session)."
+            style={{ marginBottom: 16 }}
+            actions={
+              <Button
+                variant="primary"
+                icon="external"
+                loading={busy === 'Open portal'}
+                onClick={() =>
+                  void run('Open portal', async () => {
+                    const r = await getClient().impersonateTenant(id);
+                    window.open(r.data.handoff_url, '_blank', 'noopener,noreferrer');
+                  })
+                }
+              >
+                Open tenant portal
+              </Button>
+            }
+          />
+        ) : null}
 
         <div className="ps-stats">
           {!totals ? (

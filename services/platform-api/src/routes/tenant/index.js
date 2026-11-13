@@ -16,6 +16,8 @@ import assignmentsRoutes from './assignments.routes.js';
 import { overviewRouter, accessLinksRouter } from './overview.routes.js';
 import aiHealthRoutes from './aiHealth.routes.js';
 import capacityRoutes from './capacity.routes.js';
+import proctorRoutes from './proctor.routes.js';
+import { requireAdminRole } from '../../middleware/tenantPermissions.js';
 
 export function registerTenantHttpRoutes(app) {
   app.use('/v1/tenant/auth', tenantAuthRouter);
@@ -31,13 +33,14 @@ export function registerTenantHttpRoutes(app) {
   tenantApi.use('/webhooks', webhooksRoutes);
   tenantApi.use('/tenant/sdk', tenantSdkRoutes);
   tenantApi.use('/tenant/branding', brandingRoutes);
-  tenantApi.use('/tenant/users', usersRoutes);
+  tenantApi.use('/tenant/users', requireAdminRole, usersRoutes);
   tenantApi.use('/policy-templates', policiesRouter);
   tenantApi.use('/session-templates', sessionTemplatesRouter);
   tenantApi.use('/proctor-assignments', assignmentsRoutes);
   tenantApi.use('/tenant/overview', overviewRouter);
   tenantApi.use('/tenant/ai-health', aiHealthRoutes);
   tenantApi.use('/tenant', capacityRoutes);
+  tenantApi.use('/tenant/proctoring', proctorRoutes);
   tenantApi.use('/access-links', accessLinksRouter);
 
   app.use('/v1', tenantApi);

@@ -135,10 +135,11 @@ export const DEFAULT_LOCKDOWN_POLICY: LockdownPolicy = {
   rules: {
     fullscreenExit: { action: 'WARN', threshold: 3, severity: 'flag' },
     tabSwitch: { action: 'WARN', threshold: 5, severity: 'flag' },
-    copyPaste: { action: 'LOG', severity: 'warn' },
+    windowBlur: { action: 'WARN', severity: 'warn' },
+    copyPaste: { action: 'WARN', severity: 'warn' },
     screenShareStopped: { action: 'PAUSE_EXAM', severity: 'critical' },
     cameraBlocked: { action: 'PAUSE_EXAM', severity: 'critical' },
-    heartbeatMissed: { action: 'WARN', threshold: 3, severity: 'warn' },
+    heartbeatMissed: { action: 'LOG', threshold: 3, severity: 'warn' },
     secondSession: { action: 'AUTO_TERMINATE', severity: 'critical' },
     webdriver: { action: 'AUTO_TERMINATE', severity: 'critical' },
   },

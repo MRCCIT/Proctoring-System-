@@ -1,11 +1,12 @@
 import { query } from '../config/database.js';
+import { livePresenceSql } from './sessions/livePresence.js';
 
 export async function getPlatformAnalytics() {
   const { rows: totalsRows } = await query(`
       SELECT
         (SELECT COUNT(*)::int FROM tenants WHERE status = 'active') AS active_tenants,
         (SELECT COUNT(*)::int FROM tenants) AS total_tenants,
-        (SELECT COUNT(*)::int FROM exam_sessions WHERE status = 'active') AS active_sessions,
+        (SELECT COUNT(*)::int FROM exam_sessions WHERE ${livePresenceSql('')}) AS active_sessions,
         (SELECT COUNT(*)::int FROM exam_sessions) AS total_sessions,
         (SELECT COALESCE(SUM(storage_bytes), 0)::bigint FROM exam_sessions) AS total_storage_bytes,
         (SELECT COALESCE(SUM(bytes_egress), 0)::bigint FROM exam_sessions) AS total_egress_bytes,
@@ -46,7 +47,7 @@ export async function getTenantsCompare() {
       t.slug,
       t.status,
       COUNT(s.id)::int AS total_sessions,
-      COUNT(s.id) FILTER (WHERE s.status IN ('active','paused'))::int AS active_sessions,
+      COUNT(s.id) FILTER (WHERE ${livePresenceSql('s')})::int AS active_sessions,
       COALESCE(SUM(s.violation_flags), 0)::bigint AS violation_flags_sum,
       COUNT(s.id) FILTER (WHERE s.review_decision = 'flagged')::int AS flagged_sessions,
       COUNT(s.id) FILTER (

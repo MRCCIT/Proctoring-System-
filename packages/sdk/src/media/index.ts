@@ -1,5 +1,7 @@
 export { WebRTCManager } from './WebRTCManager';
 export { TURNResolver } from './TURNResolver';
+export { LiveVideoSignaling } from './LiveVideoSignaling';
+export type { LiveVideoRole, LiveVideoSignalingOptions } from './LiveVideoSignaling';
 export { MediaRecorderWrapper } from './MediaRecorder';
 export { captureVideoFrame } from './SnapshotCapture';
 export { PermissionManager } from './PermissionManager';

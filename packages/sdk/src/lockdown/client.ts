@@ -3,7 +3,15 @@
  * Defense in depth only — browsers cannot be fully locked.
  */
 
-import type { LockdownBatch, LockdownBatchAck, LockdownEvent, LockdownEventType, LockdownPolicy, SignedLockdownPolicy } from './policy';
+import {
+  DEFAULT_LOCKDOWN_POLICY,
+  type LockdownBatch,
+  type LockdownBatchAck,
+  type LockdownEvent,
+  type LockdownEventType,
+  type LockdownPolicy,
+  type SignedLockdownPolicy,
+} from './policy';
 
 export interface LockdownTransport {
   postEvents(batch: LockdownBatch): Promise<LockdownBatchAck>;
@@ -179,7 +187,9 @@ export class LockdownClient {
     };
     this.queue.push(event);
     const ruleKey = mapTypeToRule(type);
-    const rule = ruleKey ? this.policy.rules?.[ruleKey] : undefined;
+    const rule = ruleKey
+      ? this.policy.rules?.[ruleKey] || DEFAULT_LOCKDOWN_POLICY.rules[ruleKey]
+      : undefined;
     if (rule?.action && rule.action !== 'LOG') this.onLocalAction?.(rule.action, event);
 
     const maxN = this.policy.telemetry?.batchMaxEvents || 20;
@@ -235,7 +245,8 @@ function mapTypeToRule(type: LockdownEventType) {
     case 'track_ended':
       return 'cameraBlocked' as const;
     case 'heartbeat':
-      return 'heartbeatMissed' as const;
+      // Periodic keepalive telemetry — not a missed-heartbeat violation.
+      return null;
     case 'webdriver':
       return 'webdriver' as const;
     default:

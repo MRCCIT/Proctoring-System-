@@ -209,6 +209,26 @@ export async function updateTenant(id, body) {
     e.status = 404;
     throw e;
   }
+
+  // Keep resource policies / runtime allow-list in sync when SA changes AI services
+  if (body.feature_flags && typeof body.feature_flags === 'object') {
+    try {
+      const { updateTenantPolicies } = await import('./observability/policies.js');
+      const quotas = body.quotas || (await getTenantById(id))?.quotas || {};
+      await updateTenantPolicies(
+        id,
+        {
+          max_concurrent_sessions: quotas.max_concurrent_sessions,
+          storage_mb: quotas.storage_mb,
+          ai_features: body.feature_flags,
+        },
+        { actorEmail: 'superadmin', reason: 'feature_flags_updated' }
+      );
+    } catch (e) {
+      console.warn('[updateTenant] policy mirror failed:', e.message);
+    }
+  }
+
   return getTenantById(id);
 }
 

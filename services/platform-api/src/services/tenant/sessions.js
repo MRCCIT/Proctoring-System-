@@ -1,5 +1,6 @@
 import { query } from '../../config/database.js';
 import { decodeCursor, encodeCursor } from '../../utils/cursor.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -47,7 +48,7 @@ export async function listLiveSessions(tenantId, { cursor, limit: rawLimit }) {
   const limit = clampLimit(rawLimit);
   const c = decodeCursor(cursor);
   const params = [tenantId];
-  let where = `WHERE s.tenant_id = $1 AND s.status = 'active'`;
+  let where = `WHERE s.tenant_id = $1 AND ${livePresenceSql('s')}`;
   if (c?.started_at && c?.id) {
     params.push(c.started_at, c.id);
     where += ` AND (COALESCE(s.started_at, s.created_at), s.id) < ($2::timestamptz, $3::uuid)`;

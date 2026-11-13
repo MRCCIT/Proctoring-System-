@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ankit Inc · Policy frame test</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px 40px; color: #0f172a; background: #f8fafc; }
+    h1 { font-size: 1.35rem; margin: 0 0 6px; }
+    .muted { color: #64748b; font-size: 14px; margin: 0 0 18px; line-height: 1.45; }
+    .layout { display: grid; grid-template-columns: 360px 1fr; gap: 16px; }
+    @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; }
+    video, canvas { width: 100%; border-radius: 10px; background: #0f172a; display: block; }
+    canvas { display: none; }
+    .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    button { padding: 9px 14px; border-radius: 8px; border: 0; background: #4f46e5; color: #fff; font-weight: 600; cursor: pointer; font-size: 13px; }
+    button.secondary { background: #fff; color: #0f172a; border: 1px solid #cbd5e1; }
+    button.danger { background: #b91c1c; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+    .chip { font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #e2e8f0; background: #f1f5f9; color: #64748b; }
+    .chip.on { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 700px) { .panels { grid-template-columns: 1fr; } }
+    .panel h3 { margin: 0 0 8px; font-size: 14px; }
+    .panel .status { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+    .ok { color: #166534; }
+    .bad { color: #991b1b; }
+    .wait { color: #92400e; }
+    pre { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px; overflow: auto; font-size: 11px; max-height: 280px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+    .meta { font-size: 12px; color: #64748b; margin-top: 8px; }
+    code { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Ankit Inc · Policy frame test</h1>
+  <p class="muted">
+    Basic policy: <strong>face_detection</strong> + <strong>network</strong> only.
+    Left: live camera. Right: run <em>allowed</em> analyze-frame vs <em>blocked</em> phone-check on the same frame.
+  </p>
+
+  <div class="layout">
+    <div class="card">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvas" width="640" height="480"></canvas>
+      <div class="btns">
+        <button id="cam" type="button">Start camera</button>
+        <button id="session" type="button" class="secondary" disabled>Create session</button>
+      </div>
+      <div id="chips" class="row"></div>
+      <p class="meta" id="meta">No session yet · key <code>psk_live_CJ09Jl_…</code></p>
+      <div class="btns">
+        <button id="allowed" type="button" disabled>Run allowed · analyze-frame</button>
+        <button id="blocked" type="button" class="danger" disabled>Run blocked · phone-check</button>
+        <button id="both" type="button" class="secondary" disabled>Run both on this frame</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="panels">
+        <div class="card panel">
+          <h3>Allowed path · face / analyze-frame</h3>
+          <div id="allowedStatus" class="status wait">Waiting…</div>
+          <pre id="allowedOut">—</pre>
+        </div>
+        <div class="card panel">
+          <h3>Blocked path · phone-check (object_detection)</h3>
+          <div id="blockedStatus" class="status wait">Waiting…</div>
+          <pre id="blockedOut">—</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = 'http://localhost:3001';
+    const KEY = 'psk_live_CJ09Jl_AtB-1I4MRS4gN_umQ3vbYI4ef8rSOTJ945TE';
+    const SERVICES = [
+      'face_detection', 'multiple_faces', 'gaze_tracking', 'object_detection',
+      'audio_voice', 'audio_noise', 'keystroke', 'network',
+    ];
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const chips = document.getElementById('chips');
+    const meta = document.getElementById('meta');
+    const btnCam = document.getElementById('cam');
+    const btnSession = document.getElementById('session');
+    const btnAllowed = document.getElementById('allowed');
+    const btnBlocked = document.getElementById('blocked');
+    const btnBoth = document.getElementById('both');
+
+    let sessionId = null;
+    let camReady = false;
+
+    function setEnabled() {
+      btnSession.disabled = !camReady;
+      const ready = camReady && !!sessionId;
+      btnAllowed.disabled = !ready;
+      btnBlocked.disabled = !ready;
+      btnBoth.disabled = !ready;
+    }
+
+    function showModules(mods) {
+      chips.innerHTML = '';
+      for (const id of SERVICES) {
+        const on = Boolean(mods && mods[id]);
+        const el = document.createElement('span');
+        el.className = 'chip' + (on ? ' on' : '');
+        el.textContent = (on ? '✓ ' : '× ') + id;
+        chips.appendChild(el);
+      }
+    }
+
+    async function api(method, path, body) {
+      const res = await fetch(API + path, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await res.text();
+      let json = null;
+      try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+      return { status: res.status, json };
+    }
+
+    function grabFrame() {
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      return canvas.toDataURL('image/jpeg', 0.85);
+    }
+
+    function showResult(kind, status, json) {
+      const statusEl = document.getElementById(kind + 'Status');
+      const outEl = document.getElementById(kind + 'Out');
+      outEl.textContent = JSON.stringify(json, null, 2);
+      if (kind === 'allowed') {
+        if (status >= 200 && status < 300) {
+          statusEl.className = 'status ok';
+          statusEl.textContent = 'HTTP ' + status + ' · entitled path allowed';
+        } else {
+          statusEl.className = 'status bad';
+          statusEl.textContent = 'HTTP ' + status + ' · unexpected for Basic (face should work)';
+        }
+      } else {
+        const err = json?.error || json?.extensions?.error;
+        if (status === 403) {
+          statusEl.className = 'status ok';
+          statusEl.textContent = 'HTTP 403 · correctly blocked' + (err ? ' (' + err + ')' : '');
+        } else {
+          statusEl.className = 'status bad';
+          statusEl.textContent = 'HTTP ' + status + ' · expected 403 block';
+        }
+      }
+    }
+
+    btnCam.onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        camReady = true;
+        btnCam.textContent = 'Camera on';
+        btnCam.disabled = true;
+        setEnabled();
+      } catch (e) {
+        alert('Camera failed: ' + e.message);
+      }
+    };
+
+    btnSession.onclick = async () => {
+      btnSession.disabled = true;
+      meta.textContent = 'Creating session…';
+      try {
+        const created = await api('POST', '/v1/integration/sessions', {
+          external_candidate_id: 'ankit-frame-' + Date.now(),
+          candidate_name: 'Ankit Frame Tester',
+          external_exam_id: 'ANKIT-POLICY-LAB',
+          exam_title: 'Ankit Inc frame policy check',
+          external_attempt_id: 'frame-' + Date.now(),
+        });
+        if (created.status >= 400) {
+          meta.textContent = 'Session failed HTTP ' + created.status;
+          document.getElementById('allowedOut').textContent = JSON.stringify(created.json, null, 2);
+          btnSession.disabled = false;
+          return;
+        }
+        sessionId = created.json.data.session_id;
+        const cfg = await api('GET', '/v1/sdk/sessions/' + sessionId + '/config');
+        const mods = cfg.json?.data?.policy?.ai_modules || {};
+        showModules(mods);
+        meta.textContent = 'session ' + sessionId + ' · entitlements ' + (cfg.json?.data?.policy?.entitlements_version || '—');
+        setEnabled();
+      } catch (e) {
+        meta.textContent = 'Error: ' + e.message;
+        btnSession.disabled = false;
+      }
+    };
+
+    async function runAllowed() {
+      const image = grabFrame();
+      document.getElementById('allowedStatus').className = 'status wait';
+      document.getElementById('allowedStatus').textContent = 'Sending frame…';
+      const r = await api('POST', '/v1/sdk/sessions/' + sessionId + '/ai/analyze-frame', { image });
+      showResult('allowed', r.status, r.json);
+    }
+
+    async function runBlocked() {
+      const image = grabFrame();
+      document.getElementById('blockedStatus').className = 'status wait';
+      document.getElementById('blockedStatus').textContent = 'Sending frame…';
+      const r = await api('POST', '/v1/sdk/sessions/' + sessionId + '/ai/phone-check', { image });
+      showResult('blocked', r.status, r.json);
+    }
+
+    btnAllowed.onclick = () => runAllowed().catch((e) => alert(e.message));
+    btnBlocked.onclick = () => runBlocked().catch((e) => alert(e.message));
+    btnBoth.onclick = async () => {
+      btnBoth.disabled = true;
+      try {
+        const image = grabFrame();
+        document.getElementById('allowedStatus').textContent = 'Sending…';
+        document.getElementById('blockedStatus').textContent = 'Sending…';
+        const [a, b] = await Promise.all([
+          api('POST', '/v1/sdk/sessions/' + sessionId + '/ai/analyze-frame', { image }),
+          api('POST', '/v1/sdk/sessions/' + sessionId + '/ai/phone-check', { image }),
+        ]);
+        showResult('allowed', a.status, a.json);
+        showResult('blocked', b.status, b.json);
+      } finally {
+        setEnabled();
+      }
+    };
+  </script>
+</body>
+</html>

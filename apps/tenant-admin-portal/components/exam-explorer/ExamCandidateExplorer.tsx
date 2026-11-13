@@ -18,13 +18,12 @@ import {
   CandidateBoardView,
   CandidateGridView,
   CandidateTimelineView,
-  CandidateWallView,
 } from './CandidateViewModes';
 import { getClient, tenantTokens, API_BASE } from '@/lib/api';
 import { api, qs, type ExamRow, type Paged, type SessionRow } from '@/lib/tenantApi';
 import type { ExamExplorerMode } from './ExamListView';
 
-export type CandidateViewMode = 'list' | 'grid' | 'wall' | 'board' | 'timeline';
+export type CandidateViewMode = 'list' | 'grid' | 'board' | 'timeline';
 
 const VIEW_STORAGE_KEY = 'ps_exam_candidate_view';
 
@@ -34,21 +33,30 @@ function ReviewSessionPanel({ sessionId }: { sessionId: string }) {
   const [err, setErr] = useState('');
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
+    setErr('');
     api<{ data: { session: SessionRow } }>('GET', `/v1/sessions/${sessionId}`)
       .then((r) => {
-        setSession(r.data.session);
-        setErr('');
+        if (!cancelled) setSession(r.data.session);
       })
-      .catch((e) => setErr((e as Error).message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (!cancelled) setErr((e as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId]);
 
   if (loading) return <Spinner label="Loading session…" />;
   if (err) return <p className="error">{err}</p>;
   if (!session) return <EmptyState icon="sessions" title="Session not found" description="This session may have been removed." />;
 
-  const fullHref = `/sessions/${sessionId}`;
+  const fullHref = `/sessions/${sessionId}?embed=1`;
+  const openHref = `/sessions/${sessionId}`;
 
   return (
     <>
@@ -60,21 +68,21 @@ function ReviewSessionPanel({ sessionId }: { sessionId: string }) {
         {session.risk_score != null && <Badge>Risk {Math.round(Number(session.risk_score))}</Badge>}
       </div>
       <p className="ps-muted" style={{ marginTop: 0 }}>
-        Review recording, violations, and evidence in the full review player. This panel keeps your place in the exam queue.
+        Use Reviewed next to the review tag in the list for a one-click clear, or open the full player for Cleared / Flagged / Inconclusive.
       </p>
       <iframe
         title={`Review preview ${session.candidate_name}`}
         src={fullHref}
         style={{
           width: '100%',
-          minHeight: 420,
+          minHeight: 520,
           border: '1px solid var(--ps-border)',
           borderRadius: 8,
           marginBottom: 12,
           background: 'var(--ps-surface)',
         }}
       />
-      <Button variant="primary" href={fullHref} icon="external">
+      <Button variant="primary" href={openHref} icon="external">
         Open full review player
       </Button>
     </>
@@ -84,7 +92,7 @@ function ReviewSessionPanel({ sessionId }: { sessionId: string }) {
 function loadPreferredView(mode: ExamExplorerMode): CandidateViewMode {
   try {
     const raw = localStorage.getItem(`${VIEW_STORAGE_KEY}:${mode}`);
-    if (raw === 'list' || raw === 'grid' || raw === 'wall' || raw === 'board' || raw === 'timeline') return raw;
+    if (raw === 'list' || raw === 'grid' || raw === 'board' || raw === 'timeline') return raw;
   } catch {
     /* ignore */
   }
@@ -135,13 +143,13 @@ export function ExamCandidateExplorer({
 
   useEffect(() => {
     const fromUrl = searchParams?.get('view') as CandidateViewMode | null;
-    if (fromUrl && ['list', 'grid', 'wall', 'board', 'timeline'].includes(fromUrl)) {
+    if (fromUrl && ['list', 'grid', 'board', 'timeline'].includes(fromUrl)) {
       setView(fromUrl);
     }
   }, [searchParams]);
 
   const fixedFilters = useMemo(() => {
-    if (mode === 'live') return { status: 'active,paused' };
+    if (mode === 'live') return { status: 'active,paused', live_only: '1' };
     const tab = searchParams?.get('tab') || 'pending';
     if (tab === 'reviewed') return { review_status: 'reviewed' };
     if (tab === 'in_review') return { review_status: 'in_review', status: 'completed,terminated,failed' };
@@ -151,8 +159,8 @@ export function ExamCandidateExplorer({
   const fixedKey = JSON.stringify(fixedFilters);
 
   const loadTiles = useCallback(
-    async (append = false, next: string | null = null) => {
-      setTilesLoading(true);
+    async (append = false, next: string | null = null, opts?: { soft?: boolean }) => {
+      if (!opts?.soft) setTilesLoading(true);
       try {
         const r = await api<Paged<SessionRow>>(
           'GET',
@@ -160,24 +168,30 @@ export function ExamCandidateExplorer({
             limit: 50,
             next_cursor: append ? next : undefined,
             ...JSON.parse(fixedKey),
-          })}`
+          })}`,
+          undefined,
+          { auth: opts?.soft ? 'soft' : 'hard' }
         );
         setTileRows((prev) => (append ? [...prev, ...r.data] : r.data));
         setTileCursor(r.next_cursor);
       } catch (e) {
-        setErr((e as Error).message);
+        if (!opts?.soft) setErr((e as Error).message);
       } finally {
-        setTilesLoading(false);
+        if (!opts?.soft) setTilesLoading(false);
       }
     },
     [examId, fixedKey]
   );
 
   useEffect(() => {
-    if (view === 'grid' || view === 'wall' || view === 'board' || view === 'timeline') {
+    if (view === 'grid' || view === 'board' || view === 'timeline') {
       void loadTiles(false);
       if (mode === 'live' && view !== 'timeline') {
-        const t = setInterval(() => void loadTiles(false), 10_000);
+        const tick = () => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+          void loadTiles(false, null, { soft: true });
+        };
+        const t = setInterval(tick, 10_000);
         return () => clearInterval(t);
       }
     }
@@ -186,10 +200,9 @@ export function ExamCandidateExplorer({
   const hrefFor = (sessionId: string) => `${basePath}/exams/${examId}/candidates/${sessionId}`;
 
   const token = tenantTokens.get();
-  const viewOptions: { id: CandidateViewMode; label: string; liveOnly?: boolean; reviewOnly?: boolean }[] = [
+  const viewOptions: { id: CandidateViewMode; label: string; reviewOnly?: boolean }[] = [
     { id: 'list', label: 'List' },
     { id: 'grid', label: 'Grid' },
-    { id: 'wall', label: 'Wall', liveOnly: true },
     { id: 'board', label: 'Severity board' },
     { id: 'timeline', label: 'Timeline', reviewOnly: true },
   ];
@@ -241,9 +254,9 @@ export function ExamCandidateExplorer({
               ) : (
                 <Badge tone="warning">{exam.awaiting_review_count} needs review</Badge>
               )}
-              {exam.flagged_count > 0 && <Badge tone="danger">{exam.flagged_count} flagged</Badge>}
+              {exam.flagged_count > 0 && <Badge tone="high">{exam.flagged_count} flagged</Badge>}
               {(exam.critical_violation_count || 0) > 0 && (
-                <Badge tone="danger">{exam.critical_violation_count} critical</Badge>
+                <Badge tone="critical">{exam.critical_violation_count} critical</Badge>
               )}
               <Badge>{exam.review_progress_pct ?? 100}% reviewed</Badge>
             </span>
@@ -256,7 +269,7 @@ export function ExamCandidateExplorer({
 
       <div className="ps-row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         {viewOptions
-          .filter((o) => (o.liveOnly ? mode === 'live' : true) && (o.reviewOnly ? mode === 'review' : true))
+          .filter((o) => (o.reviewOnly ? mode === 'review' : true))
           .map((o) => (
             <Button key={o.id} size="sm" variant={view === o.id ? 'primary' : 'ghost'} onClick={() => setViewPersist(o.id)}>
               {o.label}
@@ -272,6 +285,9 @@ export function ExamCandidateExplorer({
                 onClick={() => {
                   const sp = new URLSearchParams(searchParams?.toString() || '');
                   sp.set('tab', tab);
+                  // Drop stale SessionsTable review_status so Needs review cannot flip to Reviewed.
+                  sp.delete('review_status');
+                  if (tab === 'pending' || tab === 'in_review') sp.delete('status');
                   router.replace(`?${sp.toString()}`);
                 }}
               >
@@ -302,13 +318,11 @@ export function ExamCandidateExplorer({
               {tilesLoading && tileRows.length === 0 ? (
                 <div style={{ display: 'grid', gap: 10 }}>
                   {Array.from({ length: 6 }).map((_, i) => (
-                    <Skeleton key={i} height={view === 'wall' ? 72 : 96} />
+                    <Skeleton key={i} height={96} />
                   ))}
                 </div>
               ) : view === 'grid' ? (
                 <CandidateGridView rows={tileRows} hrefFor={hrefFor} emptyTitle={emptyTitle} emptyDescription={emptyDescription} />
-              ) : view === 'wall' ? (
-                <CandidateWallView rows={tileRows} hrefFor={hrefFor} emptyTitle={emptyTitle} emptyDescription={emptyDescription} />
               ) : view === 'board' ? (
                 <CandidateBoardView rows={tileRows} hrefFor={hrefFor} emptyTitle={emptyTitle} emptyDescription={emptyDescription} />
               ) : view === 'timeline' ? (

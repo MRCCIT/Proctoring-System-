@@ -4,9 +4,6 @@ import { problemDetails, ProblemTypes } from '../../utils/problemDetails.js';
 import { isUuid } from '../../utils/validation.js';
 import {
   listPolicyTemplates,
-  createPolicyTemplate,
-  updatePolicyTemplate,
-  deletePolicyTemplate,
   listSessionTemplates,
   createSessionTemplate,
   updateSessionTemplate,
@@ -43,39 +40,30 @@ function handleError(res, e) {
 }
 
 policiesRouter.get('/', asyncHandler(async (req, res) => {
-  const data = await listPolicyTemplates(req.tenantContext.tenantId);
-  res.json({ data });
+  const listed = await listPolicyTemplates(req.tenantContext.tenantId);
+  res.json({
+    data: listed.items,
+    allowed_services: listed.allowed_services,
+    feature_flags: listed.feature_flags,
+  });
 }));
 
-policiesRouter.post('/', asyncHandler(async (req, res) => {
-  try {
-    const data = await createPolicyTemplate(req.tenantContext.tenantId, req.body || {});
-    res.status(201).json({ data });
-  } catch (e) {
-    handleError(res, e);
-  }
-}));
+function policyCrudForbidden(res) {
+  return res.status(403).type('application/problem+json').json(
+    problemDetails({
+      type: ProblemTypes.forbidden,
+      title: 'Forbidden',
+      status: 403,
+      detail: 'Proctoring policies are assigned by Super Admin and cannot be created or edited here.',
+    })
+  );
+}
 
-policiesRouter.patch('/:id', asyncHandler(async (req, res) => {
-  if (!isUuid(req.params.id)) return badId(res, 'policy');
-  try {
-    const data = await updatePolicyTemplate(req.tenantContext.tenantId, req.params.id, req.body || {});
-    res.json({ data });
-  } catch (e) {
-    handleError(res, e);
-  }
-}));
+policiesRouter.post('/', asyncHandler(async (_req, res) => policyCrudForbidden(res)));
 
-policiesRouter.delete('/:id', asyncHandler(async (req, res) => {
-  if (!isUuid(req.params.id)) return badId(res, 'policy');
-  const ok = await deletePolicyTemplate(req.tenantContext.tenantId, req.params.id);
-  if (!ok) {
-    return res.status(404).type('application/problem+json').json(
-      problemDetails({ type: ProblemTypes.notFound, title: 'Not Found', status: 404, detail: 'Policy template not found' })
-    );
-  }
-  res.status(204).end();
-}));
+policiesRouter.patch('/:id', asyncHandler(async (_req, res) => policyCrudForbidden(res)));
+
+policiesRouter.delete('/:id', asyncHandler(async (_req, res) => policyCrudForbidden(res)));
 
 sessionTemplatesRouter.get('/', asyncHandler(async (req, res) => {
   const data = await listSessionTemplates(req.tenantContext.tenantId);

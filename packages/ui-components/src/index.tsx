@@ -6,6 +6,8 @@ export {
   Button,
   Badge,
   StatusBadge,
+  SeverityBadge,
+  severityTone,
   EmptyState,
   Tabs,
   Field,

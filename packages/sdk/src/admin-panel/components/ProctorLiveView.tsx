@@ -105,20 +105,13 @@ export function ProctorLiveView(props: ProctorLiveViewProps) {
 
   const filteredViolations = useMemo(() => {
     if (violationFilter === 'all') return violationThumbs;
-    return violationThumbs.filter((v) => {
-      const { code } = parseViolationCaption(v.caption);
-      return code.toLowerCase().includes(violationFilter);
-    });
+    return violationThumbs.filter((v) => parseViolationCaption(v.caption).bucket === violationFilter);
   }, [violationThumbs, violationFilter]);
 
   const violationCategories = useMemo(() => {
     const cats = new Set<string>();
     for (const v of violationThumbs) {
-      const { code } = parseViolationCaption(v.caption);
-      if (/tab|window|focus/.test(code)) cats.add('focus');
-      else if (/gaze|looking|head|sideways/.test(code)) cats.add('gaze');
-      else if (/phone|object/.test(code)) cats.add('object');
-      else cats.add('other');
+      cats.add(parseViolationCaption(v.caption).bucket);
     }
     return Array.from(cats);
   }, [violationThumbs]);
@@ -488,6 +481,24 @@ export function ProctorLiveView(props: ProctorLiveViewProps) {
                     onClick={() => setViolationFilter('object')}
                   >
                     Objects
+                  </button>
+                )}
+                {violationCategories.includes('identity') && (
+                  <button
+                    type="button"
+                    className={`evidence-chip ${violationFilter === 'identity' ? 'evidence-chip-active' : ''}`}
+                    onClick={() => setViolationFilter('identity')}
+                  >
+                    Identity
+                  </button>
+                )}
+                {violationCategories.includes('audio') && (
+                  <button
+                    type="button"
+                    className={`evidence-chip ${violationFilter === 'audio' ? 'evidence-chip-active' : ''}`}
+                    onClick={() => setViolationFilter('audio')}
+                  >
+                    Audio
                   </button>
                 )}
               </div>

@@ -55,7 +55,8 @@ export function defaultPermissions(role) {
 
 export async function listTenantUsers(tenantId) {
   const { rows } = await query(
-    `SELECT id, email, display_name, role, permissions, status, invited_at, activated_at, created_at, updated_at
+    `SELECT id, email, display_name, role, permissions, status, invited_at, activated_at, created_at, updated_at,
+            max_candidate_capacity, last_active_at
        FROM tenant_users
       WHERE tenant_id = $1
       ORDER BY created_at ASC`,
@@ -125,6 +126,20 @@ export async function updateTenantUser(tenantId, userId, body) {
     params.push(await bcrypt.hash(String(body.password), 12));
     sets.push(`password_hash = $${params.length}`);
   }
+  if (body.max_candidate_capacity !== undefined) {
+    const cap = parseInt(body.max_candidate_capacity, 10);
+    if (!Number.isFinite(cap) || cap < 1) {
+      const e = new Error('max_candidate_capacity must be a positive integer');
+      e.status = 422;
+      throw e;
+    }
+    params.push(cap);
+    sets.push(`max_candidate_capacity = $${params.length}`);
+  }
+  if (body.status !== undefined && ['active', 'disabled', 'pending'].includes(body.status)) {
+    params.push(body.status);
+    sets.push(`status = $${params.length}`);
+  }
   if (!sets.length) {
     const e = new Error('No updates provided');
     e.status = 422;
@@ -133,7 +148,8 @@ export async function updateTenantUser(tenantId, userId, body) {
   params.push(tenantId, userId);
   const sql = `UPDATE tenant_users SET ${sets.join(', ')}, updated_at = now()
                WHERE tenant_id = $${params.length - 1} AND id = $${params.length}
-               RETURNING id, email, display_name, role, permissions, created_at, updated_at`;
+               RETURNING id, email, display_name, role, permissions, status, max_candidate_capacity,
+                         last_active_at, created_at, updated_at`;
   const { rows } = await query(sql, params);
   if (!rows.length) {
     const e = new Error('Tenant user not found');
@@ -149,4 +165,49 @@ export async function deleteTenantUser(tenantId, userId) {
     [tenantId, userId]
   );
   return rowCount > 0;
+}
+
+/** Invite a proctor (no password) — reuses set-password invite flow. */
+export async function inviteProctor(tenantId, body) {
+  const email = String(body.email || '').trim().toLowerCase();
+  const display_name = body.display_name ? String(body.display_name).trim() : null;
+  const capacity = parseInt(body.max_candidate_capacity ?? 20, 10);
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    const e = new Error('A valid email is required');
+    e.status = 422;
+    throw e;
+  }
+  if (!Number.isFinite(capacity) || capacity < 1) {
+    const e = new Error('max_candidate_capacity must be a positive integer');
+    e.status = 422;
+    throw e;
+  }
+  const permissions = defaultPermissions('proctor');
+  try {
+    const { rows } = await query(
+      `INSERT INTO tenant_users
+         (tenant_id, email, password_hash, display_name, role, permissions, status, invited_at, max_candidate_capacity)
+       VALUES ($1, $2, NULL, $3, 'proctor', $4::jsonb, 'pending', now(), $5)
+       RETURNING id, email, display_name, role, permissions, status, invited_at, max_candidate_capacity, created_at`,
+      [tenantId, email, display_name, JSON.stringify(permissions), capacity]
+    );
+    const user = rows[0];
+    const { issueAuthToken } = await import('./auth.js');
+    const { sendTenantAuthEmail } = await import('./authEmail.js');
+    const invite = await issueAuthToken({ tenantId, userId: user.id, purpose: 'invite' });
+    await sendTenantAuthEmail({
+      to: email,
+      subject: 'Join ProctorShield as a proctor',
+      body: `Accept your invite and create a password: ${invite.url}`,
+      url: invite.url,
+    });
+    return { ...user, invite_url: invite.url, invite_expires_at: invite.expires_at };
+  } catch (err) {
+    if (err.code === '23505') {
+      const e = new Error('A user with this email already exists in this tenant');
+      e.status = 409;
+      throw e;
+    }
+    throw err;
+  }
 }

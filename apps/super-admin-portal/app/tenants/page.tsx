@@ -208,15 +208,30 @@ export default function TenantsPage() {
                         {relativeTime(t.updated_at)}
                       </Td>
                       <Td nowrap>
-                        <Button
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            router.push(`/tenants/${t.id}`);
-                          }}
-                        >
-                          Open
-                        </Button>
+                        <span className="ps-row" style={{ gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                          <Button
+                            size="sm"
+                            onClick={() => router.push(`/tenants/${t.id}`)}
+                          >
+                            Details
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            icon="external"
+                            disabled={t.status === 'suspended'}
+                            onClick={() => {
+                              void getClient()
+                                .impersonateTenant(t.id)
+                                .then((r) => {
+                                  window.open(r.data.handoff_url, '_blank', 'noopener,noreferrer');
+                                })
+                                .catch((e) => setErr((e as Error).message));
+                            }}
+                          >
+                            Portal
+                          </Button>
+                        </span>
                       </Td>
                     </tr>
                   ))}

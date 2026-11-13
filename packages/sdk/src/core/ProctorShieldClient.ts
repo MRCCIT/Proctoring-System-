@@ -167,6 +167,19 @@ export class ProctorShieldClient {
   listTenantUsersSa(id: string) {
     return this.request<{ data: unknown[] }>('GET', `/v1/superadmin/tenants/${id}/users`);
   }
+  /** Super admin → open tenant admin portal as that organization. */
+  impersonateTenant(id: string) {
+    return this.request<{
+      data: {
+        access_token: string;
+        handoff_url: string;
+        expires_in: string;
+        tenant: { id: string; slug: string; name: string; status: string };
+        user: { id: string; email: string; display_name: string | null; role: string; via: string };
+        impersonation: { by: string; email: string | null };
+      };
+    }>('POST', `/v1/superadmin/tenants/${id}/impersonate`);
+  }
   listActiveSessionsSa(cursor?: string) {
     return this.request<{ data: unknown[]; next_cursor: string | null }>(
       'GET',
@@ -462,7 +475,11 @@ export class ProctorShieldClient {
     return this.request<{ data: { api_key: string; tenant: unknown } }>('POST', '/v1/tenant/sdk/rotate-key');
   }
   listPolicyTemplates() {
-    return this.request<{ data: unknown[] }>('GET', '/v1/policy-templates');
+    return this.request<{
+      data: unknown[];
+      allowed_services?: { key: string; label: string; allowed: boolean }[];
+      feature_flags?: Record<string, unknown>;
+    }>('GET', '/v1/policy-templates');
   }
   createPolicyTemplate(body: Record<string, unknown>) {
     return this.request<{ data: unknown }>('POST', '/v1/policy-templates', body);

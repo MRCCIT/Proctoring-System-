@@ -13,6 +13,7 @@ import {
 } from '../services/tenantService.js';
 import { listTenantUsers } from '../services/tenant/tenantUsers.js';
 import { issueInviteLinkForUser, issueResetLinkForUser } from '../services/tenant/auth.js';
+import { impersonateTenant } from '../services/superadmin/impersonateTenant.js';
 import { listActiveSessions, getSessionById } from '../services/sessionService.js';
 import { getPlatformAnalytics, getTenantsCompare } from '../services/analyticsService.js';
 import {
@@ -175,6 +176,57 @@ router.get(
       getTenantViolationsAnalytics(req.params.id),
     ]);
     res.json({ data: { tenant_id: req.params.id, usage, violations } });
+  })
+);
+
+router.post(
+  '/tenants/:id/impersonate',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) {
+      return res.status(400).type('application/problem+json').json(
+        problemDetails({
+          type: ProblemTypes.validation,
+          title: 'Validation Error',
+          status: 400,
+          detail: 'Invalid tenant id',
+        })
+      );
+    }
+    try {
+      const result = await impersonateTenant(req.params.id, req.superadmin);
+      await writeAuditLog({
+        actorType: 'superadmin',
+        actorId: req.superadmin.sub,
+        action: 'tenant.impersonated',
+        resourceType: 'tenant',
+        resourceId: req.params.id,
+        tenantId: req.params.id,
+        details: {
+          tenant_slug: result.tenant.slug,
+          as_user: result.user.email,
+          via: result.user.via,
+        },
+      });
+      res.json({ data: result });
+    } catch (e) {
+      if (e.status === 403 || e.status === 404 || e.status === 422) {
+        return res.status(e.status).type('application/problem+json').json(
+          problemDetails({
+            type:
+              e.status === 403
+                ? ProblemTypes.forbidden
+                : e.status === 404
+                  ? ProblemTypes.notFound
+                  : ProblemTypes.validation,
+            title: e.status === 403 ? 'Forbidden' : e.status === 404 ? 'Not Found' : 'Validation Error',
+            status: e.status,
+            detail: e.message,
+            instance: req.originalUrl,
+          })
+        );
+      }
+      throw e;
+    }
   })
 );
 

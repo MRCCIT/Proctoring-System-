@@ -8,6 +8,8 @@ export { FloatingCameraWindow } from './components/FloatingCameraWindow';
 export type { FloatingCameraWindowProps } from './components/FloatingCameraWindow';
 export { ProctoringIndicator } from './components/ProctoringIndicator';
 export { ProctorChatPanel } from './components/ProctorChatPanel';
+export { SessionControlOverlay } from './components/SessionControlOverlay';
+export type { SessionControlKind, SessionControlOverlayProps } from './components/SessionControlOverlay';
 export { ViolationAlert } from './components/ViolationAlert';
 export { ProctoringTimer } from './components/ProctoringTimer';
 export { useProctoringSession } from './hooks/useProctoringSession';

@@ -96,6 +96,7 @@ router.get(
       sort: req.query.sort,
       highest_severity: req.query.highest_severity,
       min_risk: req.query.min_risk,
+      live_only: req.query.live_only,
     });
     res.json({ data: items, next_cursor, total });
   })
@@ -182,7 +183,23 @@ router.get(
       'Content-Disposition',
       `attachment; filename="${exportDownloadFilename(req.params.examId, job.kind)}"`
     );
-    fs.createReadStream(file).pipe(res);
+    res.setHeader('Cache-Control', 'no-store');
+    const stream = fs.createReadStream(file);
+    stream.on('error', () => {
+      if (!res.headersSent) {
+        res.status(500).type('application/problem+json').json(
+          problemDetails({
+            type: ProblemTypes.internal,
+            title: 'Internal Server Error',
+            status: 500,
+            detail: 'Failed to read export file',
+          })
+        );
+        return;
+      }
+      res.destroy();
+    });
+    stream.pipe(res);
   })
 );
 

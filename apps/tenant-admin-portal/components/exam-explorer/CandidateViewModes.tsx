@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Badge, EmptyState, StatusBadge } from '@proctorshield/ui-components';
+import { Badge, EmptyState, SeverityBadge, StatusBadge, severityTone } from '@proctorshield/ui-components';
 import type { SessionRow } from '@/lib/tenantApi';
 import { fetchSnapshotBlobUrl } from '@/lib/sessionMedia';
 import { formatDateTime, relativeTime } from '@/lib/format';
+import { isSessionPresent } from '@/lib/sessionPresence';
 
 type SeverityBucket = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'CLEAN';
 
@@ -20,8 +21,12 @@ function bucketFor(row: SessionRow): SeverityBucket {
   return 'CLEAN';
 }
 
+function isPresent(row: SessionRow) {
+  return isSessionPresent(row);
+}
+
 function statusDot(row: SessionRow) {
-  if (['active', 'paused'].includes(row.status) && row.connection_state !== 'disconnected') return '#16a34a';
+  if (isPresent(row)) return '#16a34a';
   if (['active', 'paused'].includes(row.status)) return '#d97706';
   if (row.status === 'terminated' || row.status === 'failed') return '#dc2626';
   return '#94a3b8';
@@ -142,11 +147,7 @@ function CandidateCard({
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 'auto' }}>
         {!compact && <StatusBadge status={row.status} />}
-        {bucket !== 'CLEAN' ? (
-          <Badge tone={bucket === 'CRITICAL' || bucket === 'HIGH' ? 'danger' : 'warning'}>{bucket}</Badge>
-        ) : (
-          <Badge tone="success">Clean</Badge>
-        )}
+        <SeverityBadge severity={bucket}>{bucket === 'CLEAN' ? 'Clean' : bucket}</SeverityBadge>
         {(row.violation_count || 0) > 0 && <Badge>{row.violation_count} viol.</Badge>}
         {row.risk_score != null && Number(row.risk_score) > 0 && (
           <Badge tone="brand">Risk {Math.round(Number(row.risk_score))}</Badge>
@@ -270,31 +271,6 @@ export function CandidateGridView({
   );
 }
 
-export function CandidateWallView({
-  rows,
-  hrefFor,
-  emptyTitle,
-  emptyDescription,
-}: {
-  rows: SessionRow[];
-  hrefFor: (id: string) => string;
-  emptyTitle: string;
-  emptyDescription: string;
-}) {
-  return (
-    <VirtualGrid
-      rows={rows}
-      hrefFor={hrefFor}
-      compact
-      minWidth={140}
-      estimateSize={130}
-      emptyTitle={emptyTitle}
-      emptyDescription={emptyDescription}
-      emptyIcon="live"
-    />
-  );
-}
-
 export function CandidateBoardView({
   rows,
   hrefFor,
@@ -340,10 +316,12 @@ function BoardColumn({
     overscan: 6,
   });
   return (
-    <div style={{ background: 'var(--ps-surface-2, #f8fafc)', borderRadius: 10, padding: 10, minHeight: 200 }}>
+    <div className={`ps-sev-board-${label}`} style={{ borderRadius: 10, padding: 10, minHeight: 200 }}>
       <div className="ps-between" style={{ marginBottom: 8 }}>
-        <strong style={{ fontSize: 13 }}>{label}</strong>
-        <Badge>{rows.length}</Badge>
+        <strong className="ps-sev-board-title" style={{ fontSize: 13 }}>
+          {label}
+        </strong>
+        <Badge tone={severityTone(label)}>{rows.length}</Badge>
       </div>
       <div ref={parentRef} style={{ height: 420, overflow: 'auto', position: 'relative' }}>
         <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
@@ -448,9 +426,7 @@ export function CandidateTimelineView({
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <StatusBadge status={r.status} />
-                {bucket !== 'CLEAN' && (
-                  <Badge tone={bucket === 'CRITICAL' || bucket === 'HIGH' ? 'danger' : 'warning'}>{bucket}</Badge>
-                )}
+                <SeverityBadge severity={bucket}>{bucket === 'CLEAN' ? 'Clean' : bucket}</SeverityBadge>
               </div>
             </button>
           );

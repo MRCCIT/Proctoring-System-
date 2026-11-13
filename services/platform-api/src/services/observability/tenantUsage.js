@@ -7,11 +7,12 @@ import { getLaneStats } from '../queue/laneStats.js';
 import { getRecentCounters } from './aggregator.js';
 import { ATTRIBUTION } from './metricContract.js';
 import { isRedisEnabled } from '../../config/redis.js';
+import { livePresenceSql } from '../sessions/livePresence.js';
 
 export async function listInfrastructureTenants() {
   const { rows } = await query(
     `SELECT t.id, t.name, t.slug, t.status, t.quotas, t.feature_flags,
-            (SELECT COUNT(*)::int FROM exam_sessions s WHERE s.tenant_id = t.id AND s.status IN ('active','paused')) AS live_sessions,
+            (SELECT COUNT(*)::int FROM exam_sessions s WHERE s.tenant_id = t.id AND ${livePresenceSql('s')}) AS live_sessions,
             (SELECT COALESCE(SUM(storage_bytes),0)::bigint FROM exam_sessions s WHERE s.tenant_id = t.id) AS storage_bytes,
             (SELECT COALESCE(SUM(bytes_egress),0)::bigint FROM exam_sessions s WHERE s.tenant_id = t.id) AS egress_bytes,
             (SELECT COALESCE(SUM(violation_flags),0)::bigint FROM exam_sessions s WHERE s.tenant_id = t.id) AS violation_flags
@@ -77,7 +78,7 @@ export async function getTenantServiceUsage(tenantId) {
   // Global RPM cannot be fully attributed without denser tags — mark estimated share by live sessions.
   const liveShare =
     Number(usage.totals.active_sessions || 0) /
-    Math.max(1, Number((await query(`SELECT COUNT(*)::int AS n FROM exam_sessions WHERE status IN ('active','paused')`)).rows[0]?.n || 1));
+    Math.max(1, Number((await query(`SELECT COUNT(*)::int AS n FROM exam_sessions WHERE ${livePresenceSql('')}`)).rows[0]?.n || 1));
 
   const maxConc = Number(policies.policies.max_concurrent_sessions || 100);
   const storageMb = Number(policies.policies.storage_mb || 10240);

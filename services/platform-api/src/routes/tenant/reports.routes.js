@@ -62,16 +62,20 @@ router.get(
     }
     if (req.query.format === 'csv') {
       const csv = rowsToCsv(report.candidates, [
+        { key: 'session_id', label: 'Session ID' },
         { key: 'candidate_id', label: 'Candidate ID' },
+        { key: 'name', label: 'Candidate' },
         { key: 'email', label: 'Email' },
-        { key: 'name', label: 'Name' },
         { key: 'external_ref', label: 'External Ref' },
-        { key: 'attended', label: 'Attended' },
         { key: 'status', label: 'Status' },
-        { key: 'success', label: 'Success' },
+        { key: 'review_status', label: 'Review Status' },
+        { key: 'review_decision', label: 'Review Decision' },
+        { key: 'violation_count', label: 'Violations' },
+        { key: 'high_severity_count', label: 'High Severity' },
+        { key: 'risk_score', label: 'Risk Score' },
+        { key: 'highest_severity', label: 'Highest Severity' },
         { key: 'started_at', label: 'Started At' },
         { key: 'ended_at', label: 'Ended At' },
-        { key: 'violation_flags', label: 'Violations' },
       ]);
       res.type('text/csv').send(csv);
       return;

@@ -53,11 +53,16 @@ export function exportDownloadFilename(examId, kind) {
 }
 
 export async function listExportJobs(tenantId, examId) {
-  const { rows } = await query(
-    `SELECT * FROM export_jobs WHERE tenant_id = $1 AND exam_id = $2 ORDER BY created_at DESC LIMIT 50`,
-    [tenantId, examId]
-  );
-  return rows.map(publicExportJob);
+  try {
+    const { rows } = await query(
+      `SELECT * FROM export_jobs WHERE tenant_id = $1 AND exam_id = $2 ORDER BY created_at DESC LIMIT 50`,
+      [tenantId, examId]
+    );
+    return rows.map(publicExportJob);
+  } catch (e) {
+    if (e?.code === '42P01') return [];
+    throw e;
+  }
 }
 
 export async function getExportJob(tenantId, examId, jobId) {
@@ -71,7 +76,10 @@ export async function getExportJob(tenantId, examId, jobId) {
 export async function createExportJob(tenantId, examId, body, actor) {
   const lane = laneDecision('export.csv', { loadLevel: getTenantLoadLevel(tenantId) });
   if (!lane.allow) {
-    const e = new Error(`Export deferred under load (${lane.lane})`);
+    const e = new Error(
+      `Export deferred under load (${lane.lane} at ${getTenantLoadLevel(tenantId)}). ` +
+        `Lower the platform load level to L0–L3 in Super Admin → Infrastructure, or set EXPORTS_DEFER_FROM=L4.`
+    );
     e.status = 503;
     throw e;
   }
@@ -102,23 +110,33 @@ export async function createExportJob(tenantId, examId, body, actor) {
     e.status = 429;
     throw e;
   }
-  const { rows } = await query(
-    `INSERT INTO export_jobs (tenant_id, exam_id, kind, scope, filters, status, created_by, meta)
-     VALUES ($1,$2,$3,$4,$5::jsonb,'queued',$6,$7::jsonb)
-     RETURNING *`,
-    [
-      tenantId,
-      examId,
-      kind,
-      scope,
-      JSON.stringify(body.filters || {}),
-      actor || null,
-      JSON.stringify({
-        generated_by: actor || 'system',
-        session_ids: body.session_ids || null,
-      }),
-    ]
-  );
+  let rows;
+  try {
+    ({ rows } = await query(
+      `INSERT INTO export_jobs (tenant_id, exam_id, kind, scope, filters, status, created_by, meta)
+       VALUES ($1,$2,$3,$4,$5::jsonb,'queued',$6,$7::jsonb)
+       RETURNING *`,
+      [
+        tenantId,
+        examId,
+        kind,
+        scope,
+        JSON.stringify(body.filters || {}),
+        actor || null,
+        JSON.stringify({
+          generated_by: actor || 'system',
+          session_ids: body.session_ids || null,
+        }),
+      ]
+    ));
+  } catch (err) {
+    if (err?.code === '42P01') {
+      const e = new Error('Export tables missing — run platform-api migrations (011_exam_aggregates_risk_exports).');
+      e.status = 503;
+      throw e;
+    }
+    throw err;
+  }
   const job = rows[0];
   await writeAuditLog({
     tenantId,
@@ -129,7 +147,7 @@ export async function createExportJob(tenantId, examId, body, actor) {
     resourceId: job.id,
     details: { exam_id: examId, kind, scope, filters: body.filters || {} },
   }).catch(() => {});
-  setImmediate(() => void runExportJob(job.id));
+  setImmediate(() => void runExportJob(job.id).catch((e) => console.error('[exports] runner', e.message || e)));
   return job;
 }
 
@@ -359,88 +377,34 @@ async function runXlsxExport(job, rel) {
 }
 
 async function runPdfExport(job, rel) {
-  const PDFDocument = (await import('pdfkit')).default;
   const filePath = abs(rel);
   ensureDir(path.dirname(filePath));
-  const { exam, agg } = await loadExamExportContext(job);
-
-  const vio = violationSqlPredicate('se');
-  const { rows: severeRows } = await query(
-    `SELECT s.id,
-            COALESCE(NULLIF(trim(s.candidate_name), ''), c.name, s.external_ref, s.id::text) AS candidate_name,
-            s.risk_score, s.highest_severity, s.review_decision,
-            (SELECT count(*)::int FROM session_events se WHERE se.session_id = s.id AND ${vio}
-               AND COALESCE(se.review_status,'open') <> 'dismissed') AS violation_count
-     FROM exam_sessions s
-     LEFT JOIN candidates c ON c.id = s.candidate_id
-     WHERE s.exam_id = $1 AND s.tenant_id = $2
-       AND (
-         upper(COALESCE(s.highest_severity,'')) IN ('CRITICAL','HIGH','FLAG')
-         OR COALESCE(s.risk_score,0) >= ${SEVERE_RISK_MIN}
-       )
-     ORDER BY COALESCE(s.risk_score,0) DESC, s.id
-     LIMIT 40`,
-    [job.exam_id, job.tenant_id]
-  );
-
-  await new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
-    const out = fs.createWriteStream(filePath);
-    doc.pipe(out);
-    out.on('finish', resolve);
-    out.on('error', reject);
-    doc.on('error', reject);
-
-    doc.fontSize(18).text('Exam proctoring report', { underline: true });
-    doc.moveDown(0.5);
-    doc.fontSize(12).text(`Exam: ${exam?.title || job.exam_id}`);
-    if (exam?.external_exam_id) doc.text(`External ID: ${exam.external_exam_id}`);
-    doc.text(`Generated: ${new Date().toISOString()}`);
-    doc.moveDown();
-
-    doc.fontSize(14).text('Summary', { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(11);
-    if (agg) {
-      doc.text(`Candidates: ${agg.total_candidates ?? 0}`);
-      doc.text(`Appeared: ${agg.appeared ?? 0} · Submitted: ${agg.submitted ?? 0} · Terminated: ${agg.terminated ?? 0}`);
-      doc.text(`Violations: ${agg.total_violations ?? 0} · Critical: ${agg.critical_violation_count ?? 0}`);
-      doc.text(`Avg risk: ${agg.avg_risk_score != null ? Math.round(Number(agg.avg_risk_score)) : '—'}`);
-      doc.text(`Review pending: ${agg.review_pending ?? 0}`);
-    } else {
-      doc.text('Aggregate stats unavailable.');
-    }
-    doc.moveDown();
-    doc.fontSize(10).fillColor('#555').text('Full candidate and violation lists are available in Excel or CSV exports.');
-    doc.fillColor('#000');
-    doc.moveDown();
-
-    doc.fontSize(14).text('Top severe candidates', { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(10);
-    if (!severeRows.length) {
-      doc.text('No severe cases recorded.');
-    } else {
-      for (const r of severeRows) {
-        doc.text(
-          `• ${r.candidate_name} — risk ${Math.round(Number(r.risk_score || 0))}, ${r.highest_severity || '—'}, ${r.violation_count ?? 0} violations, decision ${r.review_decision || '—'}`
-        );
-      }
-    }
-    doc.end();
-  });
-
-  return {
-    severe_limit: 40,
-    severe_rows: severeRows.length,
-    full_list_in: 'xlsx_or_csv',
-    note: 'PDF contains summary and top severe candidates only.',
-  };
+  const { writeExamIntegrityPdf } = await import('./examIntegrityPdf.js');
+  return writeExamIntegrityPdf(job, filePath);
 }
 
 function jobFileRel(job) {
   const ext = job.kind === 'csv' ? 'csv' : job.kind === 'xlsx' ? 'xlsx' : 'pdf';
   return `exports/${job.tenant_id}/${job.exam_id}/${job.id}.${ext}`;
+}
+
+async function markExportFailed(jobId, message) {
+  try {
+    await query(
+      `UPDATE export_jobs SET status = 'failed', error = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1`,
+      [jobId, String(message || 'Export failed').slice(0, 2000)]
+    );
+  } catch (err) {
+    // Schema may lag (e.g. missing heartbeat_at) — never let export crash the API process.
+    try {
+      await query(
+        `UPDATE export_jobs SET status = 'failed', error = $2, finished_at = now() WHERE id = $1`,
+        [jobId, String(message || err.message || 'Export failed').slice(0, 2000)]
+      );
+    } catch (err2) {
+      console.error('[exports] failed to mark job failed', jobId, err2.message || err2);
+    }
+  }
 }
 
 async function runExportJob(jobId) {
@@ -450,7 +414,11 @@ async function runExportJob(jobId) {
     const { rows } = await query(`SELECT * FROM export_jobs WHERE id = $1`, [jobId]);
     const job = rows[0];
     if (!job || job.status !== 'queued') return;
-    await query(`UPDATE export_jobs SET status = 'running', heartbeat_at = now(), progress = 1 WHERE id = $1`, [jobId]);
+    try {
+      await query(`UPDATE export_jobs SET status = 'running', heartbeat_at = now(), progress = 1 WHERE id = $1`, [jobId]);
+    } catch {
+      await query(`UPDATE export_jobs SET status = 'running', progress = 1 WHERE id = $1`, [jobId]);
+    }
 
     const rel = jobFileRel(job);
     ensureDir(path.dirname(abs(rel)));
@@ -466,26 +434,39 @@ async function runExportJob(jobId) {
       throw new Error(`Unsupported export kind: ${job.kind}`);
     }
 
-    await query(
-      `UPDATE export_jobs SET status = 'done', progress = 100, file_path = $2, finished_at = now(), heartbeat_at = now(),
-       meta = meta || $3::jsonb WHERE id = $1`,
-      [jobId, rel, JSON.stringify({ ...meta, generated_at: new Date().toISOString(), exam_id: job.exam_id })]
-    );
+    try {
+      await query(
+        `UPDATE export_jobs SET status = 'done', progress = 100, file_path = $2, finished_at = now(), heartbeat_at = now(),
+         meta = meta || $3::jsonb WHERE id = $1`,
+        [jobId, rel, JSON.stringify({ ...meta, generated_at: new Date().toISOString(), exam_id: job.exam_id })]
+      );
+    } catch {
+      await query(
+        `UPDATE export_jobs SET status = 'done', progress = 100, file_path = $2, finished_at = now(),
+         meta = meta || $3::jsonb WHERE id = $1`,
+        [jobId, rel, JSON.stringify({ ...meta, generated_at: new Date().toISOString(), exam_id: job.exam_id })]
+      );
+    }
   } catch (err) {
-    await query(
-      `UPDATE export_jobs SET status = 'failed', error = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1`,
-      [jobId, String(err.message || err)]
-    );
+    console.error('[exports] job failed', jobId, err.message || err);
+    await markExportFailed(jobId, err.message || err);
   } finally {
     runners.delete(jobId);
   }
 }
 
 export async function resumeQueuedExports() {
+  try {
+    await query(
+      `UPDATE export_jobs SET status = 'failed', error = 'Interrupted runner', finished_at = now()
+       WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < now() - interval '2 minutes')`
+    );
+  } catch {
+    await query(
+      `UPDATE export_jobs SET status = 'failed', error = 'Interrupted runner', finished_at = now()
+       WHERE status = 'running'`
+    ).catch(() => {});
+  }
   const { rows } = await query(`SELECT id FROM export_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 20`);
-  for (const r of rows) setImmediate(() => void runExportJob(r.id));
-  await query(
-    `UPDATE export_jobs SET status = 'failed', error = 'Interrupted runner', finished_at = now()
-     WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < now() - interval '2 minutes')`
-  );
+  for (const r of rows) setImmediate(() => void runExportJob(r.id).catch((e) => console.error('[exports] runner', e.message || e)));
 }
