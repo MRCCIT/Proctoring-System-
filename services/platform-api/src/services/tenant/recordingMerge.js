@@ -1,19 +1,21 @@
+import crypto from 'crypto';
 import { query } from '../../config/database.js';
 import {
   readFileSafe,
   writeBuffer,
-  mergedRecordingKey,
+  recordingVariantKey,
   fileExists,
-  abs,
 } from '../../storage/localStorage.js';
 import {
-  compressRecordingBuffer,
-  ffmpegAvailable,
-  isRecordingCompressEnabled,
-} from './videoCompress.js';
+  ORIGINAL_SEQUENCE,
+  COMPRESSED_SEQUENCE,
+  FALLBACK_SEQUENCE,
+  MERGED_SEQUENCE,
+} from '../media/videoCompressionConfig.js';
+import { enqueueCompressJob } from '../media/compressionJobs.js';
+import { getVideoCompressionConfig } from '../media/videoCompressionConfig.js';
 
-/** Reserved sequence for one merged file per track (camera / screen). */
-export const MERGED_SEQUENCE = 999999;
+export { MERGED_SEQUENCE, ORIGINAL_SEQUENCE, COMPRESSED_SEQUENCE, FALLBACK_SEQUENCE };
 
 function sanitizeSlug(label) {
   const s = String(label || 'candidate')
@@ -47,43 +49,46 @@ function parseMeta(metadata) {
   }
 }
 
-function isMergedRow(row) {
+function isVariantRow(row) {
+  const variant = row.variant || parseMeta(row.metadata).variant;
+  if (variant === 'original' || variant === 'compressed' || variant === 'fallback') return true;
   const meta = parseMeta(row.metadata);
-  return meta.merged === true || row.sequence >= MERGED_SEQUENCE;
+  return meta.merged === true || Number(row.sequence) >= FALLBACK_SEQUENCE;
+}
+
+function isSegmentRow(row) {
+  if (isVariantRow(row)) return false;
+  const variant = row.variant || parseMeta(row.metadata).variant;
+  if (variant && variant !== 'segment') return false;
+  return Number(row.sequence) < FALLBACK_SEQUENCE;
 }
 
 /**
- * Concatenate persisted WebM chunk files per track into one playable file.
- * When ffmpeg is available, re-encodes to compressed H.264 MP4 (seekable, smaller).
- * Falls back to raw WebM concat if ffmpeg is missing or compression is disabled.
+ * Assemble immutable original WebM per track and enqueue async compression.
+ * Does not re-encode on the request thread; originals are never deleted.
  */
 export async function mergeSessionRecordings(tenantId, sessionId) {
   const candidateLabel = await getSessionCandidateLabel(tenantId, sessionId);
   const slug = sanitizeSlug(candidateLabel);
+  const cfg = getVideoCompressionConfig();
 
   const { rows: chunks } = await query(
-    `SELECT id, track, sequence, file_path, bytes, started_at, ended_at, mime_type, metadata
+    `SELECT id, track, sequence, file_path, bytes, duration_ms, started_at, ended_at, mime_type, metadata, variant
        FROM session_recording_chunks
       WHERE tenant_id = $1 AND session_id = $2 AND file_path IS NOT NULL
       ORDER BY track, sequence ASC`,
     [tenantId, sessionId]
   );
 
-  const segmentChunks = chunks.filter((c) => !isMergedRow(c));
+  const segmentChunks = chunks.filter(isSegmentRow);
   const byTrack = new Map();
   for (const c of segmentChunks) {
     if (!byTrack.has(c.track)) byTrack.set(c.track, []);
     byTrack.get(c.track).push(c);
   }
 
-  const wantCompress = isRecordingCompressEnabled() && (await ffmpegAvailable());
-  if (isRecordingCompressEnabled() && !wantCompress) {
-    console.warn(
-      '[recordingMerge] ffmpeg not found — storing raw merged WebM. Install ffmpeg or set FFMPEG_PATH for compression.'
-    );
-  }
-
-  const merged = [];
+  const assembled = [];
+  const jobs = [];
 
   for (const [track, list] of byTrack) {
     if (!list.length) continue;
@@ -107,62 +112,27 @@ export async function mergeSessionRecordings(tenantId, sessionId) {
     if (!buffers.length) continue;
 
     const rawMerged = Buffer.concat(buffers);
-    let relKey;
-    let outBytes;
-    let outMime;
-    let ext;
-    let compressMeta = { compressed: false };
+    const checksum = crypto.createHash('sha256').update(rawMerged).digest('hex');
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const relKey = recordingVariantKey(tenantId, sessionId, slug, track, 'original', ext);
+    writeBuffer(relKey, rawMerged);
 
-    if (wantCompress) {
-      try {
-        ext = 'mp4';
-        relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
-        const result = await compressRecordingBuffer(rawMerged, {
-          workDirRel: `recordings/${tenantId}/${sessionId}/merged/_tmp`,
-          outputRelKey: relKey,
-        });
-        outBytes = result.bytes;
-        outMime = result.mime_type;
-        compressMeta = {
-          compressed: true,
-          codec: 'h264+aac',
-          crf: result.crf,
-          preset: result.preset,
-          max_height: result.maxHeight,
-          raw_bytes: rawMerged.length,
-          ratio: rawMerged.length ? Number((outBytes / rawMerged.length).toFixed(3)) : null,
-        };
-      } catch (e) {
-        console.warn('[recordingMerge] compress failed, falling back to raw WebM:', e.message);
-        ext = mime.includes('mp4') ? 'mp4' : 'webm';
-        relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
-        writeBuffer(relKey, rawMerged);
-        outBytes = rawMerged.length;
-        outMime = mime;
-        compressMeta = { compressed: false, compress_error: String(e.message || e).slice(0, 240) };
-      }
-    } else {
-      ext = mime.includes('mp4') ? 'mp4' : 'webm';
-      relKey = mergedRecordingKey(tenantId, sessionId, slug, track, ext);
-      writeBuffer(relKey, rawMerged);
-      outBytes = rawMerged.length;
-      outMime = mime;
-    }
-
-    const displayName = `${slug}-${track}.${ext}`;
+    const displayName = `${slug}-${track}-original.${ext}`;
     const metadata = {
       merged: true,
+      variant: 'original',
       candidate_label: candidateLabel,
       display_name: displayName,
       segment_count: list.length,
-      mime: outMime,
-      ...compressMeta,
+      mime,
+      immutable: true,
     };
 
     const { rows } = await query(
       `INSERT INTO session_recording_chunks
-         (tenant_id, session_id, track, sequence, object_key, duration_ms, bytes, started_at, ended_at, metadata, file_path, mime_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+         (tenant_id, session_id, track, sequence, object_key, duration_ms, bytes, started_at, ended_at,
+          metadata, file_path, mime_type, variant, checksum_sha256, compression_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'original',$13,'pending')
        ON CONFLICT (session_id, track, sequence) DO UPDATE SET
          object_key = EXCLUDED.object_key,
          duration_ms = EXCLUDED.duration_ms,
@@ -171,62 +141,92 @@ export async function mergeSessionRecordings(tenantId, sessionId) {
          ended_at = EXCLUDED.ended_at,
          metadata = EXCLUDED.metadata,
          file_path = EXCLUDED.file_path,
-         mime_type = EXCLUDED.mime_type
-       RETURNING id, track, sequence, object_key, duration_ms, bytes, started_at, ended_at, metadata, file_path, mime_type, created_at`,
+         mime_type = EXCLUDED.mime_type,
+         variant = 'original',
+         checksum_sha256 = EXCLUDED.checksum_sha256,
+         compression_status = CASE
+           WHEN session_recording_chunks.compression_status = 'completed' THEN session_recording_chunks.compression_status
+           ELSE 'pending'
+         END
+       RETURNING *`,
       [
         tenantId,
         sessionId,
         track,
-        MERGED_SEQUENCE,
+        ORIGINAL_SEQUENCE,
         relKey,
         totalDuration || null,
-        outBytes,
+        rawMerged.length,
         earliest,
         latest,
         JSON.stringify(metadata),
         relKey,
-        outMime,
+        mime,
+        checksum,
       ]
     );
 
-    merged.push(rows[0]);
+    assembled.push(rows[0]);
 
+    // Prefer original for session pointer until compressed completes
     if (track === 'camera' && fileExists(relKey)) {
       await query(
-        `UPDATE exam_sessions SET recording_object_key = $1, updated_at = now()
-         WHERE id = $2 AND tenant_id = $3`,
+        `UPDATE exam_sessions SET recording_object_key = COALESCE(recording_object_key, $1), updated_at = now()
+          WHERE id = $2 AND tenant_id = $3`,
         [relKey, sessionId, tenantId]
       );
     }
 
-    // Drop leftover uncompressed twin if we switched extension (e.g. .webm → .mp4)
-    if (wantCompress && compressMeta.compressed && ext === 'mp4') {
-      const legacyWebm = mergedRecordingKey(tenantId, sessionId, slug, track, 'webm');
-      if (legacyWebm !== relKey) {
-        try {
-          const { default: fs } = await import('fs');
-          const p = abs(legacyWebm);
-          if (fs.existsSync(p)) fs.unlinkSync(p);
-        } catch {
-          /* ignore */
-        }
+    if (cfg.enabled) {
+      try {
+        jobs.push(await enqueueCompressJob({ tenantId, sessionId, track }));
+      } catch (e) {
+        console.warn('[recordingMerge] compress enqueue failed', track, e.message || e);
       }
     }
   }
 
-  return { candidate_label: candidateLabel, merged, compressed: wantCompress };
+  return {
+    candidate_label: candidateLabel,
+    merged: assembled,
+    original: assembled,
+    compress_jobs: jobs,
+    compressed: false,
+  };
 }
 
+/**
+ * List playback-ready rows: prefer compressed / fallback / original variants.
+ * Still triggers assemble if no variants exist yet.
+ */
 export async function listSessionRecordingsForPlayback(tenantId, sessionId) {
   await mergeSessionRecordings(tenantId, sessionId);
   const { rows } = await query(
-    `SELECT id, track, sequence, object_key, duration_ms, bytes, started_at, ended_at, metadata, created_at, file_path, mime_type
+    `SELECT id, track, sequence, object_key, duration_ms, bytes, started_at, ended_at, metadata, created_at,
+            file_path, mime_type, variant, checksum_sha256, compression_status, compression_error,
+            compression_profile, width, height, fps
        FROM session_recording_chunks
       WHERE tenant_id = $1 AND session_id = $2
       ORDER BY track, sequence ASC`,
     [tenantId, sessionId]
   );
-  const merged = rows.filter(isMergedRow);
-  if (merged.length) return merged;
-  return rows.filter((r) => r.file_path);
+
+  const variants = rows.filter(isVariantRow);
+  if (variants.length) {
+    // Prefer one row per track: compressed > fallback > original > legacy merged
+    const byTrack = new Map();
+    const rank = (r) => {
+      const v = r.variant || parseMeta(r.metadata).variant;
+      if (v === 'compressed' || Number(r.sequence) === COMPRESSED_SEQUENCE) return 3;
+      if (v === 'fallback' || Number(r.sequence) === FALLBACK_SEQUENCE) return 2;
+      if (v === 'original' || Number(r.sequence) === ORIGINAL_SEQUENCE) return 1;
+      return 0;
+    };
+    for (const r of variants) {
+      const prev = byTrack.get(r.track);
+      if (!prev || rank(r) > rank(prev)) byTrack.set(r.track, r);
+    }
+    return [...byTrack.values()];
+  }
+  return rows.filter((r) => r.file_path && isSegmentRow(r));
 }

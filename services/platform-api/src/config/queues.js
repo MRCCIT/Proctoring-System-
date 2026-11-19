@@ -5,6 +5,8 @@ import { isRedisEnabled } from './redis.js';
 let aiQueue = null;
 /** @type {import('bullmq').Queue | null} */
 let telemetryQueue = null;
+/** @type {import('bullmq').Queue | null} */
+let mediaQueue = null;
 /** @type {import('bullmq').QueueEvents | null} */
 let aiQueueEvents = null;
 
@@ -63,6 +65,25 @@ export async function getAiQueueEvents() {
   return aiQueueEvents;
 }
 
+export async function getMediaQueue() {
+  if (!isQueueEnabled()) return null;
+  if (!mediaQueue) {
+    const { Queue } = await import('bullmq');
+    const { getRedis } = await import('./redis.js');
+    const connection = await getRedis();
+    mediaQueue = new Queue(`${QUEUE_PREFIX}:media-compress`, {
+      connection,
+      defaultJobOptions: {
+        removeOnComplete: { age: 3600, count: 2000 },
+        removeOnFail: { age: 86400, count: 1000 },
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+      },
+    });
+  }
+  return mediaQueue;
+}
+
 export function useAsyncAi() {
   return config.aiMode === 'async' && isQueueEnabled();
 }
@@ -75,9 +96,11 @@ export async function closeQueues() {
   const closes = [];
   if (aiQueue) closes.push(aiQueue.close());
   if (telemetryQueue) closes.push(telemetryQueue.close());
+  if (mediaQueue) closes.push(mediaQueue.close());
   if (aiQueueEvents) closes.push(aiQueueEvents.close());
   await Promise.all(closes);
   aiQueue = null;
   telemetryQueue = null;
+  mediaQueue = null;
   aiQueueEvents = null;
 }

@@ -86,6 +86,16 @@ export function mergedRecordingKey(tenantId, sessionId, candidateSlug, track, ex
   return `recordings/${tenantId}/${sessionId}/merged/${safe}-${track}.${ext}`;
 }
 
+/** Dual-storage paths: original / compressed / fallback under session folder. */
+export function recordingVariantKey(tenantId, sessionId, candidateSlug, track, variant, ext = 'webm') {
+  const safe = String(candidateSlug || 'candidate')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, 64);
+  const folder =
+    variant === 'original' ? 'original' : variant === 'fallback' ? 'fallback' : variant === 'compressed' ? 'compressed' : 'merged';
+  return `recordings/${tenantId}/${sessionId}/${folder}/${safe}-${track}.${ext}`;
+}
+
 export function snapshotKey(tenantId, sessionId, label = 'evidence') {
   const safe = String(label).replace(/[^a-z0-9_.-]/gi, '_').slice(0, 32) || 'evidence';
   return `snapshots/${tenantId}/${sessionId}/${Date.now()}-${safe}.jpg`;

@@ -119,6 +119,19 @@ export interface SessionEvent {
   payload: Record<string, unknown>;
 }
 
+export interface EvidenceRecordingSource {
+  id: string;
+  variant: string;
+  mime_type: string | null;
+  bytes: number | null;
+  codec?: string | null;
+  compression_status?: string | null;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  url: string | null;
+}
+
 export interface EvidenceRecording {
   id: string;
   track: string;
@@ -130,6 +143,18 @@ export interface EvidenceRecording {
   started_at: string | null;
   ended_at: string | null;
   url: string | null;
+  variant?: string | null;
+  preferred_source?: string | null;
+  compression_status?: string | null;
+  compression_error?: string | null;
+  compression_profile?: string | null;
+  savings_percent?: number | null;
+  codec?: string | null;
+  sources?: {
+    original?: EvidenceRecordingSource | null;
+    compressed?: EvidenceRecordingSource | null;
+    fallback?: EvidenceRecordingSource | null;
+  } | null;
 }
 
 export interface EvidenceSnapshot {

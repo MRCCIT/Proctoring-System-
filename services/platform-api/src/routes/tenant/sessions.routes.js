@@ -212,6 +212,32 @@ router.get(
   })
 );
 
+router.post(
+  '/:id/recordings/compress',
+  asyncHandler(async (req, res) => {
+    if (!isUuid(req.params.id)) return badId(res);
+    await assertSessionBelongs(req.tenantContext.tenantId, req.params.id);
+    const { enqueueCompressForSession } = await import('../../services/media/compressionJobs.js');
+    const { mergeSessionRecordings } = await import('../../services/tenant/recordingMerge.js');
+    await mergeSessionRecordings(req.tenantContext.tenantId, req.params.id);
+    const force = Boolean(req.body?.force);
+    const data = await enqueueCompressForSession(req.tenantContext.tenantId, req.params.id, { force });
+    try {
+      const { emitMetric } = await import('../../services/observability/aggregator.js');
+      emitMetric({
+        tenant_id: req.tenantContext.tenantId,
+        service_name: 'media',
+        metric_name: 'compress_queued',
+        metric_value: data.tracks?.length || 0,
+        operation_name: 'recordings_compress',
+      });
+    } catch {
+      /* ignore */
+    }
+    res.json({ data });
+  })
+);
+
 router.get(
   '/:id/integrity-report',
   asyncHandler(async (req, res) => {

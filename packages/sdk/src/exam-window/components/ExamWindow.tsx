@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ProctorShieldClient } from '../../core/ProctorShieldClient';
 import { PermissionManager } from '../../media/PermissionManager';
-import { ChunkedRecorder, buildChunkSignaler } from '../../media/ChunkedRecorder';
+import { ChunkedRecorder, buildChunkSignaler, CONCAT_SAFE_RECORDING_MIMES } from '../../media/ChunkedRecorder';
+import { ChunkUploader, createFetchChunkTransport } from '../../media/chunkUploader';
 import { bindStreamToVideo, captureFrameFromStream } from '../../media/captureFrame';
 import { LiveVideoSignaling } from '../../media/LiveVideoSignaling';
 import { FaceCheckService } from '../../ai-client/FaceCheckService';
@@ -163,6 +164,7 @@ export function ExamWindow(props: ExamWindowProps) {
   const camMicStreamRef = useRef<MediaStream | null>(null);
   const camRecorderRef = useRef<ChunkedRecorder | null>(null);
   const screenRecorderRef = useRef<ChunkedRecorder | null>(null);
+  const chunkUploaderRef = useRef<ChunkUploader | null>(null);
   const faceServiceRef = useRef<FaceCheckService | null>(null);
   const policyRef = useRef<{
     ai_modules?: Record<string, boolean>;
@@ -457,6 +459,35 @@ export function ExamWindow(props: ExamWindowProps) {
         ksRef.current.start((a) => addViolation(`keystroke_${a.reason}`));
       }
 
+      {
+        const signaler = buildChunkSignaler(client, sid, {
+          extraMetadata: {
+            capture_width: permsRef.current?.lastVideoSettings?.width,
+            capture_height: permsRef.current?.lastVideoSettings?.height,
+            capture_fps: permsRef.current?.lastVideoSettings?.frameRate,
+          },
+        });
+        const getToken = () => presetToken || null;
+        const uploader = new ChunkUploader({
+          transport: createFetchChunkTransport({ baseUrl, getToken, useSdkPath: true }),
+          maxRetries: 5,
+          idbName: `ps-chunks-${sid}`,
+          fallbackUpload: async (chunk) => {
+            await signaler({
+              blob: chunk.blob,
+              sequence: chunk.index,
+              track: chunk.track as 'camera' | 'screen',
+              startedAt: chunk.startedAt || new Date().toISOString(),
+              endedAt: chunk.endedAt || new Date().toISOString(),
+              mimeType: chunk.mimeType,
+              settings: permsRef.current?.lastVideoSettings,
+            });
+          },
+        });
+        chunkUploaderRef.current = uploader;
+        void uploader.whenReady();
+      }
+
       if (camMicStream) {
         camMicStreamRef.current = camMicStream;
         if (hiddenVideoRef.current) {
@@ -465,8 +496,21 @@ export function ExamWindow(props: ExamWindowProps) {
 
         camRecorderRef.current = new ChunkedRecorder({
           track: 'camera',
-          chunkMs: 10_000,
-          onChunk: buildChunkSignaler(client, sid),
+          chunkMs: 5_000,
+          bitsPerSecond: 1_200_000,
+          mimeTypes: CONCAT_SAFE_RECORDING_MIMES,
+          onChunk: async (info) => {
+            chunkUploaderRef.current?.enqueue({
+              sessionId: sid,
+              track: info.track,
+              index: info.sequence,
+              blob: info.blob,
+              mimeType: info.mimeType || info.blob.type || 'video/webm',
+              idempotencyKey: `${sid}:${info.track}:${info.sequence}`,
+              startedAt: info.startedAt,
+              endedAt: info.endedAt,
+            });
+          },
         });
         camRecorderRef.current.start(camMicStream);
         camMicStream.getVideoTracks().forEach((t) => lockdownClientRef.current?.observeTrack(t, 'camera'));
@@ -575,10 +619,34 @@ export function ExamWindow(props: ExamWindowProps) {
       }
 
       if (screenStream) {
+        const screenOnChunk =
+          chunkUploaderRef.current != null
+            ? async (info: {
+                blob: Blob;
+                sequence: number;
+                track: 'camera' | 'screen' | 'audio' | 'composite';
+                startedAt: string;
+                endedAt: string;
+                mimeType: string;
+              }) => {
+                chunkUploaderRef.current!.enqueue({
+                  sessionId: sid,
+                  track: info.track,
+                  index: info.sequence,
+                  blob: info.blob,
+                  mimeType: info.mimeType || info.blob.type || 'video/webm',
+                  idempotencyKey: `${sid}:${info.track}:${info.sequence}`,
+                  startedAt: info.startedAt,
+                  endedAt: info.endedAt,
+                });
+              }
+            : buildChunkSignaler(client, sid);
         screenRecorderRef.current = new ChunkedRecorder({
           track: 'screen',
-          chunkMs: 15_000,
-          onChunk: buildChunkSignaler(client, sid),
+          chunkMs: 5_000,
+          bitsPerSecond: 1_200_000,
+          mimeTypes: CONCAT_SAFE_RECORDING_MIMES,
+          onChunk: screenOnChunk,
         });
         screenRecorderRef.current.start(screenStream);
         // Detect "Stop sharing" / screen track ended → PAUSE + violation capture

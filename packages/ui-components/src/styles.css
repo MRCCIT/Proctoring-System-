@@ -485,13 +485,40 @@ pre.json, .ps-code {
   overflow-wrap: anywhere;
 }
 .ps-secret > span { flex: 1; min-width: 0; }
-.ps-bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 160px; padding-top: 8px; }
-.ps-bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; height: 100%; justify-content: flex-end; }
-.ps-bar-stack { width: 100%; max-width: 28px; display: flex; flex-direction: column-reverse; gap: 2px; height: calc(100% - 20px); justify-content: flex-start; }
-.ps-bar { width: 100%; border-radius: 4px 4px 2px 2px; min-height: 2px; }
 .ps-bar-a { background: var(--ps-brand); }
 .ps-bar-b { background: #f59e0b; }
-.ps-bar-label { font-size: 10.5px; color: var(--ps-text-3); white-space: nowrap; }
+
+/* Daily bar chart (tenant analytics): plot + axis share one grid so columns align. */
+.ps-chart-summary { margin: 0 0 14px; font-size: 12.5px; color: var(--ps-text-2); }
+.ps-chart-summary strong { color: var(--ps-text); font-weight: 600; }
+.ps-dbc { display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 8px; row-gap: 8px; padding-top: 10px; }
+.ps-dbc-yaxis { position: relative; height: var(--dbc-h); font-size: 10.5px; color: var(--ps-text-3); font-variant-numeric: tabular-nums; }
+.ps-dbc-yaxis > span { position: absolute; right: 0; transform: translateY(-50%); line-height: 1; }
+.ps-dbc-plot { position: relative; height: var(--dbc-h); display: grid; column-gap: 4px; border-bottom: 1px solid var(--ps-border-strong); }
+.ps-dbc-gridline { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--ps-border); pointer-events: none; }
+.ps-dbc-col { position: relative; height: 100%; min-width: 0; display: flex; align-items: flex-end; justify-content: center; border-radius: 4px 4px 0 0; transition: background-color .12s; }
+.ps-dbc-col:hover { background: rgba(79, 70, 229, .06); }
+.ps-dbc-group { display: flex; align-items: flex-end; gap: 2px; width: 100%; max-width: 20px; height: 100%; }
+.ps-dbc-slot { flex: 1; min-width: 0; height: 100%; display: flex; align-items: flex-end; }
+.ps-dbc-stack { display: flex; flex-direction: column-reverse; justify-content: flex-start; gap: 1px; width: 100%; max-width: 18px; height: 100%; }
+.ps-dbc-bar { width: 100%; flex-shrink: 0; border-radius: 3px 3px 0 0; }
+.ps-dbc-stack > .ps-dbc-bar { border-radius: 0; }
+.ps-dbc-stack > .ps-dbc-bar:last-child { border-radius: 3px 3px 0 0; }
+.ps-dbc-tip {
+  position: absolute; left: 50%; transform: translateX(-50%); z-index: 2;
+  display: inline-flex; gap: 6px; padding: 3px 7px; border-radius: 5px;
+  background: #0f172a; color: #fff; font-size: 10.5px; font-weight: 600; white-space: nowrap;
+  opacity: 0; pointer-events: none; transition: opacity .12s;
+}
+.ps-dbc-tip.is-start { left: 0; transform: none; }
+.ps-dbc-tip.is-end { left: auto; right: 0; transform: none; }
+.ps-dbc-col:hover .ps-dbc-tip { opacity: 1; }
+.ps-dbc-tip-item { display: inline-flex; align-items: center; gap: 4px; }
+.ps-dbc-tip-item i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.ps-dbc-axis { display: grid; column-gap: 4px; height: 14px; font-size: 10.5px; line-height: 14px; color: var(--ps-text-3); }
+.ps-dbc-tick { display: flex; justify-content: center; min-width: 0; white-space: nowrap; }
+.ps-dbc-tick.is-end { justify-content: flex-end; }
+.ps-dbc-tick.is-start { justify-content: flex-start; }
 .ps-legend { display: flex; gap: 14px; font-size: 12px; color: var(--ps-text-2); }
 .ps-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .ps-meter { height: 8px; border-radius: 999px; background: #eef0f5; overflow: hidden; }

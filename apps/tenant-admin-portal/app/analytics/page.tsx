@@ -15,102 +15,84 @@ import { AuthGuard } from '@/components/AuthGuard';
 import { TenantAdminShell } from '@/components/TenantAdminShell';
 import { getClient } from '@/lib/api';
 import type { UsageAnalytics, ViolationsAnalytics } from '@/lib/analyticsTypes';
-import { formatBytes, formatCount, formatDayShort, humanizeCode } from '@/lib/format';
+import { formatBytes, formatCount, formatUtcDayLong, formatUtcDayShort, humanizeCode } from '@/lib/format';
+import { DailyBarChart, type DailyBarDay } from '@/components/analytics/DailyBarChart';
 
 type DayPoint = { day: string; sessions: number; events: number; serious: number };
 
+const SESSIONS_COLOR = 'var(--ps-brand)';
+const ALERT_COLOR = '#f59e0b';
+const SERIOUS_COLOR = 'var(--ps-danger)';
+
+/** Server buckets with date_trunc('day') in UTC, so the range is keyed by UTC calendar day. */
+function utcDayKey(value: string | Date) {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
 function fillLastDays(days: number, sessions: UsageAnalytics['sessions_per_day'], events: ViolationsAnalytics['events_per_day']): DayPoint[] {
   const map = new Map<string, DayPoint>();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    map.set(key, { day: d.toISOString(), sessions: 0, events: 0, serious: 0 });
+    const d = new Date(todayUtc - i * 86_400_000);
+    map.set(utcDayKey(d), { day: d.toISOString(), sessions: 0, events: 0, serious: 0 });
   }
   for (const s of sessions || []) {
-    const key = new Date(s.day).toISOString().slice(0, 10);
-    const row = map.get(key);
-    if (row) row.sessions = s.sessions;
+    const row = map.get(utcDayKey(s.day));
+    if (row) row.sessions += s.sessions;
   }
   for (const e of events || []) {
-    const key = new Date(e.day).toISOString().slice(0, 10);
-    const row = map.get(key);
+    const row = map.get(utcDayKey(e.day));
     if (row) {
-      row.events = e.events;
-      row.serious = e.serious;
+      row.events += e.events;
+      row.serious += e.serious;
     }
   }
   return [...map.values()];
 }
 
+function plural(n: number, one: string, many = `${one}s`) {
+  return `${formatCount(n)} ${n === 1 ? one : many}`;
+}
+
 function ActivityChart({ series }: { series: DayPoint[] }) {
-  const max = Math.max(1, ...series.map((d) => Math.max(d.sessions, d.events)));
+  const days: DailyBarDay[] = series.map((d) => ({
+    key: d.day,
+    label: formatUtcDayShort(d.day),
+    title: `${formatUtcDayLong(d.day)}: ${plural(d.sessions, 'session')}, ${plural(d.events, 'violation')} (${formatCount(d.serious)} serious)`,
+    values: { sessions: d.sessions, events: d.events },
+  }));
   return (
-    <>
-      <div className="ps-bar-chart">
-        {series.map((d, i) => {
-          const showLabel = i % 3 === 0 || i === series.length - 1;
-          return (
-            <div
-              className="ps-bar-col"
-              key={d.day}
-              title={`${formatDayShort(d.day)}: ${d.sessions} sessions, ${d.events} violations (${d.serious} serious)`}
-            >
-              <div className="ps-bar-stack" style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 2 }}>
-                <div className="ps-bar ps-bar-a" style={{ height: `${(d.sessions / max) * 100}%` }} />
-                <div className="ps-bar ps-bar-b" style={{ height: `${(d.events / max) * 100}%` }} />
-              </div>
-              <span className="ps-bar-label">{showLabel ? formatDayShort(d.day) : ''}</span>
-            </div>
-          );
-        })}
-      </div>
-      <div className="ps-legend" style={{ marginTop: 10 }}>
-        <span>
-          <i style={{ background: 'var(--ps-brand)' }} />
-          Sessions
-        </span>
-        <span>
-          <i style={{ background: '#f59e0b' }} />
-          Violations
-        </span>
-      </div>
-    </>
+    <DailyBarChart
+      mode="grouped"
+      days={days}
+      series={[
+        { key: 'sessions', label: 'Sessions', color: SESSIONS_COLOR },
+        { key: 'events', label: 'Violations', color: ALERT_COLOR },
+      ]}
+    />
   );
 }
 
 function SeverityChart({ series }: { series: DayPoint[] }) {
-  const max = Math.max(1, ...series.map((d) => Math.max(d.events, d.serious)));
+  const days: DailyBarDay[] = series.map((d) => {
+    const other = Math.max(0, d.events - d.serious);
+    return {
+      key: d.day,
+      label: formatUtcDayShort(d.day),
+      title: `${formatUtcDayLong(d.day)}: ${formatCount(d.serious)} serious, ${formatCount(other)} other`,
+      values: { other, serious: d.serious },
+    };
+  });
   return (
-    <>
-      <div className="ps-bar-chart">
-        {series.map((d, i) => {
-          const showLabel = i % 3 === 0 || i === series.length - 1;
-          const other = Math.max(0, d.events - d.serious);
-          return (
-            <div className="ps-bar-col" key={d.day} title={`${formatDayShort(d.day)}: ${d.serious} serious / ${d.events} total`}>
-              <div className="ps-bar-stack">
-                {d.serious > 0 && <div className="ps-bar" style={{ height: `${(d.serious / max) * 100}%`, background: 'var(--ps-danger)' }} />}
-                {other > 0 && <div className="ps-bar ps-bar-b" style={{ height: `${(other / max) * 100}%` }} />}
-              </div>
-              <span className="ps-bar-label">{showLabel ? formatDayShort(d.day) : ''}</span>
-            </div>
-          );
-        })}
-      </div>
-      <div className="ps-legend" style={{ marginTop: 10 }}>
-        <span>
-          <i style={{ background: 'var(--ps-danger)' }} />
-          Serious
-        </span>
-        <span>
-          <i style={{ background: '#f59e0b' }} />
-          Other alerts
-        </span>
-      </div>
-    </>
+    <DailyBarChart
+      mode="stacked"
+      days={days}
+      series={[
+        { key: 'other', label: 'Other alerts', color: ALERT_COLOR },
+        { key: 'serious', label: 'Serious', color: SERIOUS_COLOR },
+      ]}
+    />
   );
 }
 
@@ -209,16 +191,32 @@ export default function AnalyticsPage() {
 
         <div className="ps-grid ps-grid-main">
           <div>
-            <Card title="Activity" description="Sessions started vs integrity alerts each day.">
-              {!usage || !violations ? <Skeleton height={180} /> : <ActivityChart series={series} />}
+            <Card title="Activity" description="Sessions started vs integrity alerts each day (UTC).">
+              {!usage || !violations ? (
+                <Skeleton height={180} />
+              ) : sessionSum === 0 && eventSum === 0 ? (
+                <EmptyState icon="chart" title="No activity in the last 30 days" description="Sessions and integrity alerts appear here once candidates start exams." />
+              ) : (
+                <>
+                  <p className="ps-chart-summary">
+                    <strong>{plural(sessionSum, 'session')}</strong> · <strong>{plural(eventSum, 'violation')}</strong> in 30 days
+                  </p>
+                  <ActivityChart series={series} />
+                </>
+              )}
             </Card>
-            <Card title="Alert severity" description="Serious flags stacked above lower-severity alerts.">
+            <Card title="Alert severity" description="Serious flags stacked above lower-severity alerts (UTC).">
               {!violations ? (
                 <Skeleton height={180} />
               ) : eventSum === 0 ? (
                 <EmptyState icon="check" title="No alerts in the last 30 days" description="When detections fire, severity trends appear here." />
               ) : (
-                <SeverityChart series={series} />
+                <>
+                  <p className="ps-chart-summary">
+                    <strong>{formatCount(seriousSum)} serious</strong> · <strong>{formatCount(Math.max(0, eventSum - seriousSum))} other</strong>
+                  </p>
+                  <SeverityChart series={series} />
+                </>
               )}
             </Card>
           </div>

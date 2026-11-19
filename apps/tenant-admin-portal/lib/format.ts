@@ -25,6 +25,26 @@ export function formatDayShort(iso: string): string {
   return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
 }
 
+/** `phone_detected` / `FACE_NOT_VISIBLE` -> `Phone detected` / `Face not visible`. */
+export function humanizeCode(code: string | null | undefined): string {
+  if (!code) return 'Unknown';
+  const words = String(code).replace(/[_\-.]+/g, ' ').trim().toLowerCase();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Unknown';
+}
+
+/** For server day buckets (UTC midnight) — formats the bucket's own date, not the viewer's local one. */
+export function formatUtcDayShort(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '?';
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+export function formatUtcDayLong(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '?';
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);

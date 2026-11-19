@@ -2,7 +2,7 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Badge, EmptyState } from '@proctorshield/ui-components';
-import type { EvidenceRecording } from '@/lib/tenantApi';
+import type { EvidenceRecording, EvidenceRecordingSource } from '@/lib/tenantApi';
 import { formatBytes, formatOffset } from '@/lib/format';
 
 export interface RecordingPlayerHandle {
@@ -14,6 +14,7 @@ export interface RecordingPlayerHandle {
 }
 
 type PaneTrack = 'camera' | 'screen' | 'audio';
+type SourceKey = 'compressed' | 'fallback' | 'original';
 
 const TRACK_LABEL: Record<string, string> = {
   camera: 'Camera + voice',
@@ -53,23 +54,83 @@ function seekableEnd(el: HTMLMediaElement): number | null {
   return null;
 }
 
+function resolveSource(
+  rec: EvidenceRecording | null,
+  override: SourceKey | null
+): { key: SourceKey | 'legacy'; url: string; mime: string | null; label: string } | null {
+  if (!rec) return null;
+  const order: SourceKey[] = override
+    ? [override, 'compressed', 'fallback', 'original']
+    : ['compressed', 'fallback', 'original'];
+  const seen = new Set<string>();
+  for (const key of order) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const src: EvidenceRecordingSource | null | undefined = rec.sources?.[key];
+    if (key === 'compressed' && src && src.compression_status && src.compression_status !== 'completed') {
+      if (!src.url || src.compression_status === 'compression_failed' || src.compression_status === 'validation_failed') {
+        continue;
+      }
+      if (src.compression_status !== 'completed' && !override) continue;
+    }
+    if (src?.url) {
+      return {
+        key,
+        url: src.url,
+        mime: src.mime_type,
+        label: key === 'compressed' ? 'Compressed' : key === 'fallback' ? 'H.264 fallback' : 'Original',
+      };
+    }
+  }
+  if (rec.url) {
+    return { key: (rec.preferred_source as SourceKey) || 'legacy', url: rec.url, mime: rec.mime_type, label: 'Recording' };
+  }
+  return null;
+}
+
 /**
  * Dual review player: camera (with mic voice) + screen side-by-side, synced seeking.
- * MediaRecorder WebM is often poorly seekable — fragment reloads are driven via React
- * state so a later re-render cannot wipe `el.src` back to the unfragmented URL.
+ * Prefers compressed (AV1/VP9) → H.264 fallback → original; switches on decode error.
  */
 export const RecordingPlayer = forwardRef<
   RecordingPlayerHandle,
   { recordings: EvidenceRecording[]; onUrlExpired?: () => void; onTime?: (instantIso: string | null) => void }
 >(function RecordingPlayer({ recordings, onUrlExpired, onTime }, ref) {
-  const playable = useMemo(() => recordings.filter((r) => r.url), [recordings]);
-  const camera = pickTrack(playable, 'camera');
-  const screen = pickTrack(playable, 'screen');
+  const playable = useMemo(() => recordings.filter((r) => r.url || r.sources?.original?.url || r.sources?.compressed?.url || r.sources?.fallback?.url), [recordings]);
+  const cameraRec = pickTrack(playable, 'camera');
+  const screenRec = pickTrack(playable, 'screen');
   const audioOnly = pickTrack(playable, 'audio');
-  const voiceSource = camera || audioOnly;
-  const voiceOn = hasAudio(voiceSource);
 
-  const primary = camera || screen || audioOnly || playable[0] || null;
+  const [sourceOverride, setSourceOverride] = useState<SourceKey | null>(null);
+  const [failedKeys, setFailedKeys] = useState<Set<string>>(() => new Set());
+
+  const cameraResolved = useMemo(() => {
+    const r = resolveSource(cameraRec, sourceOverride);
+    if (r && failedKeys.has(`camera:${r.key}`)) {
+      for (const next of ['fallback', 'original', 'compressed'] as SourceKey[]) {
+        if (failedKeys.has(`camera:${next}`)) continue;
+        const alt = resolveSource(cameraRec, next);
+        if (alt && alt.key !== r.key) return alt;
+      }
+    }
+    return r;
+  }, [cameraRec, sourceOverride, failedKeys]);
+
+  const screenResolved = useMemo(() => {
+    const r = resolveSource(screenRec, sourceOverride);
+    if (r && failedKeys.has(`screen:${r.key}`)) {
+      for (const next of ['fallback', 'original', 'compressed'] as SourceKey[]) {
+        if (failedKeys.has(`screen:${next}`)) continue;
+        const alt = resolveSource(screenRec, next);
+        if (alt && alt.key !== r.key) return alt;
+      }
+    }
+    return r;
+  }, [screenRec, sourceOverride, failedKeys]);
+
+  const voiceSource = cameraRec || audioOnly;
+  const voiceOn = hasAudio(voiceSource);
+  const primary = cameraRec || screenRec || audioOnly || playable[0] || null;
   const cameraRef = useRef<HTMLVideoElement>(null);
   const screenRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -80,33 +141,31 @@ export const RecordingPlayer = forwardRef<
   const [time, setTime] = useState(0);
   const [muted, setMuted] = useState(false);
   const [seekHint, setSeekHint] = useState<string | null>(null);
-  /** React-owned seek target — keeps #t= on src across re-renders. */
   const [seekAt, setSeekAt] = useState<number | null>(null);
   const [seekNonce, setSeekNonce] = useState(0);
 
   const startMs = primary?.started_at ? new Date(primary.started_at).getTime() : null;
   startMsRef.current = startMs;
-  const isWebm = Boolean(primary?.mime_type?.toLowerCase().includes('webm'));
-  const isMp4 = Boolean(primary?.mime_type?.toLowerCase().includes('mp4'));
+  const primaryMime = cameraResolved?.mime || screenResolved?.mime || primary?.mime_type;
+  const isWebm = Boolean(primaryMime?.toLowerCase().includes('webm'));
+  const isMp4 = Boolean(primaryMime?.toLowerCase().includes('mp4'));
 
   const cameraSrc = useMemo(() => {
-    if (!camera?.url) return null;
-    if (seekAt == null) return camera.url;
-    return withTimeFragment(camera.url, seekAt);
-  }, [camera?.url, seekAt, seekNonce]);
+    if (!cameraResolved?.url) return null;
+    if (seekAt == null) return cameraResolved.url;
+    return withTimeFragment(cameraResolved.url, seekAt);
+  }, [cameraResolved?.url, seekAt, seekNonce]);
 
   const screenSrc = useMemo(() => {
-    if (!screen?.url) return null;
-    if (seekAt == null) return screen.url;
-    return withTimeFragment(screen.url, seekAt);
-  }, [screen?.url, seekAt, seekNonce]);
+    if (!screenResolved?.url) return null;
+    if (seekAt == null) return screenResolved.url;
+    return withTimeFragment(screenResolved.url, seekAt);
+  }, [screenResolved?.url, seekAt, seekNonce]);
 
   const applyCurrentTime = (el: HTMLMediaElement | null, sec: number) => {
     if (!el) return;
     let t = Math.max(0, sec);
     const end = seekableEnd(el);
-    // Only clamp when the browser reports a usable seekable range that covers
-    // at least the target — never clamp a 7s jump down to ~0 on broken WebM.
     if (end != null && end + 0.25 >= t) {
       t = Math.min(t, Math.max(0, end - 0.05));
     } else if (Number.isFinite(el.duration) && el.duration > 0 && el.duration !== Infinity && el.duration + 0.25 >= t) {
@@ -127,9 +186,8 @@ export const RecordingPlayer = forwardRef<
       if (!Number.isFinite(actual)) return;
       if (target > 1.5 && actual < Math.max(0.5, target * 0.15)) {
         setSeekHint(
-          'This recording format (raw WebM) often cannot jump precisely in the browser. Use the nearest snapshot below, or remux to MP4.'
+          'This recording format (raw WebM) often cannot jump precisely in the browser. Use the nearest snapshot below, or wait for compressed/H.264 output.'
         );
-        // Hard fragment reload via React state (survives re-renders).
         setSeekAt(target);
         setSeekNonce((n) => n + 1);
       } else {
@@ -145,7 +203,6 @@ export const RecordingPlayer = forwardRef<
     setTime(t);
 
     if (preferFragment) {
-      // Drive #t= through React so setActiveEvent / time updates cannot reset src.
       setSeekAt(t);
       setSeekNonce((n) => n + 1);
       window.setTimeout(() => {
@@ -178,7 +235,6 @@ export const RecordingPlayer = forwardRef<
     const el = cameraRef.current || screenRef.current;
     el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-    // MP4 / well-indexed media: currentTime. WebM / unknown: fragment reload.
     const end = el ? seekableEnd(el) : null;
     const canDirect =
       isMp4 || (end != null && end >= Math.max(2, t)) || (!isWebm && Number.isFinite(el?.duration) && (el?.duration || 0) > t);
@@ -221,6 +277,17 @@ export const RecordingPlayer = forwardRef<
     } else finish();
   };
 
+  const onDecodeError = (track: PaneTrack, key: string) => {
+    setFailedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(`${track}:${key}`);
+      return next;
+    });
+    if (key === 'compressed') setSourceOverride((cur) => cur || 'fallback');
+    else if (key === 'fallback') setSourceOverride('original');
+    else onUrlExpired?.();
+  };
+
   useImperativeHandle(ref, () => ({
     seekToOffset: (seconds: number) => {
       queueSeek(Math.max(0, Number(seconds) - 0.35));
@@ -248,7 +315,7 @@ export const RecordingPlayer = forwardRef<
     setSeekAt(null);
     setSeekNonce(0);
     pending.current = null;
-  }, [camera?.url, screen?.url, audioOnly?.url]);
+  }, [cameraResolved?.url, screenResolved?.url, audioOnly?.url]);
 
   useEffect(() => {
     for (const el of [cameraRef.current, audioRef.current]) {
@@ -266,15 +333,20 @@ export const RecordingPlayer = forwardRef<
     );
   }
 
-  const panes: { key: PaneTrack; rec: EvidenceRecording | null; label: string; src: string | null }[] = [
-    { key: 'camera', rec: camera, label: 'Camera', src: cameraSrc },
-    { key: 'screen', rec: screen, label: 'Screen', src: screenSrc },
+  const panes: { key: PaneTrack; rec: EvidenceRecording | null; label: string; src: string | null; resolvedKey: string }[] = [
+    { key: 'camera', rec: cameraRec, label: 'Camera', src: cameraSrc, resolvedKey: cameraResolved?.key || 'legacy' },
+    { key: 'screen', rec: screenRec, label: 'Screen', src: screenSrc, resolvedKey: screenResolved?.key || 'legacy' },
   ];
+
+  const availableSources: SourceKey[] = [];
+  for (const k of ['compressed', 'fallback', 'original'] as SourceKey[]) {
+    if (cameraRec?.sources?.[k]?.url || screenRec?.sources?.[k]?.url) availableSources.push(k);
+  }
 
   return (
     <div>
       <div className="rec-dual">
-        {panes.map(({ key, rec, label, src }) => (
+        {panes.map(({ key, rec, label, src, resolvedKey }) => (
           <div key={key} className="rec-pane">
             <div className="rec-pane-head">
               <strong>{label}</strong>
@@ -284,20 +356,25 @@ export const RecordingPlayer = forwardRef<
                 </Badge>
               )}
               {!rec && <Badge tone="neutral">Not recorded</Badge>}
+              {src && (
+                <Badge tone={resolvedKey === 'compressed' ? 'brand' : resolvedKey === 'fallback' ? 'info' : 'neutral'}>
+                  {resolvedKey === 'compressed' ? 'Compressed' : resolvedKey === 'fallback' ? 'H.264' : resolvedKey === 'original' ? 'Original' : 'File'}
+                </Badge>
+              )}
             </div>
             <div className="rec-stage">
               {src ? (
                 <video
-                  key={`${key}-${stripMediaFragment(src)}-${seekNonce}`}
+                  key={`${key}-${stripMediaFragment(src)}-${seekNonce}-${resolvedKey}`}
                   ref={key === 'camera' ? cameraRef : screenRef}
                   src={src}
-                  controls={key === 'camera' || !camera}
+                  controls={key === 'camera' || !cameraRec}
                   muted={key === 'screen' ? true : muted}
                   preload="auto"
                   playsInline
                   className="rec-video"
                   onLoadedMetadata={(e) => {
-                    if (key === 'camera' || (!camera && key === 'screen')) onPrimaryMeta(e.currentTarget);
+                    if (key === 'camera' || (!cameraRec && key === 'screen')) onPrimaryMeta(e.currentTarget);
                     if (seekAt != null) {
                       applyCurrentTime(e.currentTarget, seekAt);
                       void e.currentTarget.play().catch(() => {});
@@ -318,7 +395,7 @@ export const RecordingPlayer = forwardRef<
                     }
                   }}
                   onTimeUpdate={(e) => {
-                    if (key !== 'camera' && camera) return;
+                    if (key !== 'camera' && cameraRec) return;
                     const t = e.currentTarget.currentTime;
                     if (!Number.isFinite(t) || t > 1e9) return;
                     setTime(t);
@@ -339,7 +416,7 @@ export const RecordingPlayer = forwardRef<
                     }
                   }}
                   onSeeked={(e) => {
-                    if (key !== 'camera' && camera) return;
+                    if (key !== 'camera' && cameraRec) return;
                     const t = e.currentTarget.currentTime;
                     setTime(t);
                     syncing.current = true;
@@ -361,7 +438,7 @@ export const RecordingPlayer = forwardRef<
                       syncing.current = false;
                     });
                   }}
-                  onError={() => onUrlExpired?.()}
+                  onError={() => onDecodeError(key, resolvedKey)}
                 />
               ) : (
                 <div className="rec-missing">
@@ -376,11 +453,11 @@ export const RecordingPlayer = forwardRef<
             </div>
             {rec && (
               <div className="rec-pane-meta">
-                {formatBytes(rec.bytes)} · {rec.mime_type?.includes('mp4') ? 'MP4' : 'WebM'}
-                {rec.url && (
+                {formatBytes(rec.bytes)} · {primaryMime?.includes('mp4') ? 'MP4' : 'WebM'}
+                {src && (
                   <>
                     {' · '}
-                    <a href={stripMediaFragment(rec.url)} target="_blank" rel="noreferrer">
+                    <a href={stripMediaFragment(src)} target="_blank" rel="noreferrer">
                       Download
                     </a>
                   </>
@@ -391,7 +468,7 @@ export const RecordingPlayer = forwardRef<
         ))}
       </div>
 
-      {audioOnly?.url && !hasAudio(camera) && (
+      {audioOnly?.url && !hasAudio(cameraRec) && (
         <audio
           key={audioOnly.url}
           ref={audioRef}
@@ -401,7 +478,7 @@ export const RecordingPlayer = forwardRef<
           style={{ width: '100%', marginTop: 10 }}
           muted={muted}
           onLoadedMetadata={(e) => {
-            if (!camera && !screen) onPrimaryMeta(e.currentTarget);
+            if (!cameraRec && !screenRec) onPrimaryMeta(e.currentTarget);
           }}
           onError={() => onUrlExpired?.()}
         />
@@ -440,6 +517,22 @@ export const RecordingPlayer = forwardRef<
           <button type="button" className="ps-btn ps-btn-ghost ps-btn-sm" onClick={() => setMuted((m) => !m)}>
             {muted ? 'Unmute voice' : 'Mute voice'}
           </button>
+          {availableSources.length > 1 && (
+            <label className="ps-muted" style={{ fontSize: 12.5, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              Source
+              <select
+                value={sourceOverride || cameraResolved?.key || screenResolved?.key || 'compressed'}
+                onChange={(e) => setSourceOverride(e.target.value as SourceKey)}
+                style={{ fontSize: 12.5 }}
+              >
+                {availableSources.map((k) => (
+                  <option key={k} value={k}>
+                    {k === 'compressed' ? 'Compressed' : k === 'fallback' ? 'H.264 fallback' : 'Original'}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
         <span className="ps-muted" style={{ fontSize: 12.5 }}>
           {formatOffset(time)} · click a detection to jump here

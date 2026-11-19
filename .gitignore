@@ -17,6 +17,9 @@ storage/snapshots/
 storage/exports/
 storage/identity/references/
 
+# Candidate media and tenant uploads (never commit recordings, snapshots, or identity photos)
+/storage/
+
 # Training datasets and generated runs
 python/data/electronics/
 python/runs/

@@ -5,6 +5,7 @@ import { listSessionRecordingsForPlayback } from './recordingMerge.js';
 import { getSessionEnriched } from './sessionQueries.js';
 import { emitSessionWebhook } from '../sdk/candidateSessions.js';
 import { refreshExamAggregate } from '../aggregates/examAggregates.js';
+import { preferRecordingSource } from '../media/recordingPlaybackPrefer.js';
 
 function fail(status, message) {
   const e = new Error(message);
@@ -65,11 +66,157 @@ export async function getSessionTimeline(tenantId, sessionId) {
   return { session, recording_origin: origin, events };
 }
 
+function parseRecordingMeta(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'object') return metadata;
+  try {
+    return JSON.parse(metadata);
+  } catch {
+    return {};
+  }
+}
+
+function mapVariantSource(tenantId, r) {
+  if (!r) return null;
+  const meta = parseRecordingMeta(r.metadata);
+  return {
+    id: String(r.id),
+    variant: r.variant || meta.variant || 'compressed',
+    mime_type: r.mime_type,
+    bytes: r.bytes != null ? Number(r.bytes) : null,
+    codec: meta.codec || meta.strategy || null,
+    compression_status: r.compression_status || null,
+    width: r.width != null ? Number(r.width) : null,
+    height: r.height != null ? Number(r.height) : null,
+    fps: r.fps != null ? Number(r.fps) : null,
+    url: r.file_path ? buildEvidenceSignedUrl(tenantId, 'recording', r.id) : null,
+  };
+}
+
+function preferPlaybackRow(byVariant) {
+  const picked = preferRecordingSource(byVariant);
+  if (!picked) return null;
+  return { key: picked.key, src: picked.source };
+}
+
 export async function getSessionEvidence(tenantId, sessionId) {
   const session = await getSessionEnriched(tenantId, sessionId);
   if (!session) return null;
   const origin = await recordingOrigin(tenantId, sessionId, session);
-  const recordings = await listSessionRecordingsForPlayback(tenantId, sessionId);
+  // Ensure originals are assembled + compress enqueued
+  await listSessionRecordingsForPlayback(tenantId, sessionId);
+
+  const { rows: allRecs } = await query(
+    `SELECT id, track, sequence, object_key, duration_ms, bytes, started_at, ended_at, metadata,
+            file_path, mime_type, variant, checksum_sha256, compression_status, compression_error,
+            compression_profile, width, height, fps
+       FROM session_recording_chunks
+      WHERE tenant_id = $1 AND session_id = $2
+        AND (
+          variant IN ('original', 'compressed', 'fallback')
+          OR sequence >= 999997
+          OR COALESCE((metadata->>'merged')::boolean, false) = true
+        )
+      ORDER BY track, sequence ASC`,
+    [tenantId, sessionId]
+  );
+
+  const byTrack = new Map();
+  for (const r of allRecs) {
+    const meta = parseRecordingMeta(r.metadata);
+    let variant = r.variant || meta.variant;
+    if (!variant) {
+      if (Number(r.sequence) === 999998) variant = 'original';
+      else if (Number(r.sequence) === 999997) variant = 'fallback';
+      else variant = 'compressed';
+    }
+    if (!byTrack.has(r.track)) {
+      byTrack.set(r.track, {
+        track: r.track,
+        duration_ms: r.duration_ms,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        compression_status: null,
+        compression_error: null,
+        compression_profile: null,
+        variants: {},
+      });
+    }
+    const g = byTrack.get(r.track);
+    g.variants[variant] = r;
+    if (r.duration_ms != null) g.duration_ms = r.duration_ms;
+    if (r.started_at && (!g.started_at || r.started_at < g.started_at)) g.started_at = r.started_at;
+    if (r.ended_at && (!g.ended_at || r.ended_at > g.ended_at)) g.ended_at = r.ended_at;
+    if (variant === 'original' || variant === 'compressed') {
+      g.compression_status = r.compression_status || g.compression_status;
+      g.compression_error = r.compression_error || g.compression_error;
+      g.compression_profile = r.compression_profile || g.compression_profile;
+    }
+  }
+
+  const recordings = [];
+  for (const g of byTrack.values()) {
+    const original = mapVariantSource(tenantId, g.variants.original);
+    const compressed = mapVariantSource(tenantId, g.variants.compressed);
+    const fallback = mapVariantSource(tenantId, g.variants.fallback);
+    const preferred = preferPlaybackRow({ original, compressed, fallback });
+    const origBytes = original?.bytes;
+    const compBytes = compressed?.bytes;
+    const savings =
+      origBytes && compBytes && origBytes > 0
+        ? Number((((origBytes - compBytes) / origBytes) * 100).toFixed(1))
+        : null;
+    const display =
+      preferred?.key && g.variants[preferred.key]
+        ? parseRecordingMeta(g.variants[preferred.key].metadata).display_name
+        : null;
+
+    recordings.push({
+      id: preferred?.src?.id || original?.id || compressed?.id || fallback?.id || `${g.track}`,
+      track: g.track,
+      merged: true,
+      variant: preferred?.key || null,
+      display_name: display || `${g.track}-${preferred?.key || 'recording'}`,
+      mime_type: preferred?.src?.mime_type || null,
+      bytes: preferred?.src?.bytes ?? null,
+      duration_ms: g.duration_ms,
+      started_at: g.started_at,
+      ended_at: g.ended_at,
+      url: preferred?.src?.url || null,
+      compression_status: g.compression_status || compressed?.compression_status || null,
+      compression_error: g.compression_error || null,
+      compression_profile: g.compression_profile || null,
+      savings_percent: savings,
+      codec: preferred?.src?.codec || null,
+      sources: { original, compressed, fallback },
+      preferred_source: preferred?.key || null,
+    });
+  }
+
+  // Fallback: segment rows if no variants yet
+  if (!recordings.length) {
+    const legacy = await listSessionRecordingsForPlayback(tenantId, sessionId);
+    for (const r of legacy) {
+      const meta = parseRecordingMeta(r.metadata);
+      recordings.push({
+        id: String(r.id),
+        track: r.track,
+        merged: meta.merged === true,
+        variant: r.variant || meta.variant || null,
+        display_name: meta.display_name || `${r.track}-${r.sequence}`,
+        mime_type: r.mime_type,
+        bytes: r.bytes != null ? Number(r.bytes) : null,
+        duration_ms: r.duration_ms,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        url: r.file_path ? buildEvidenceSignedUrl(tenantId, 'recording', r.id) : null,
+        compression_status: r.compression_status || null,
+        sources: null,
+        preferred_source: null,
+      });
+    }
+  }
+
   const { rows: snaps } = await query(
     `SELECT id, caption, violation_context, captured_at, mime_type, bytes, source, file_path
      FROM session_snapshots WHERE tenant_id = $1 AND session_id = $2 ORDER BY captured_at ASC`,
@@ -79,21 +226,7 @@ export async function getSessionEvidence(tenantId, sessionId) {
   return {
     recording_origin: origin,
     expires_in_seconds: parseInt(process.env.SIGNED_LINK_TTL_SECONDS || '900', 10) || 900,
-    recordings: recordings.map((r) => {
-      const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata || '{}') : r.metadata || {};
-      return {
-        id: String(r.id),
-        track: r.track,
-        merged: meta.merged === true,
-        display_name: meta.display_name || `${r.track}-${r.sequence}`,
-        mime_type: r.mime_type,
-        bytes: r.bytes != null ? Number(r.bytes) : null,
-        duration_ms: r.duration_ms,
-        started_at: r.started_at,
-        ended_at: r.ended_at,
-        url: r.file_path ? buildEvidenceSignedUrl(tenantId, 'recording', r.id) : null,
-      };
-    }),
+    recordings,
     snapshots: snaps.map((s) => ({
       id: s.id,
       caption: s.caption,

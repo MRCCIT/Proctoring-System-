@@ -3,25 +3,54 @@ import type { ProctorShieldClient } from '../core/ProctorShieldClient';
 export type RecordingTrack = 'camera' | 'screen' | 'audio' | 'composite';
 
 export interface ChunkedRecorderOptions {
-  /** Length of each chunk in ms (default 10s) */
+  /** Length of each chunk in ms (default 5s for dual-storage pipeline) */
   chunkMs?: number;
   /** Track label (camera/screen/...) */
   track: RecordingTrack;
   /** Mime preference list, first supported is used */
   mimeTypes?: string[];
   /**
-   * Target bitrate for MediaRecorder (bits/sec). Lower = smaller uploads.
-   * Defaults: camera ~900kbps, screen ~1.2Mbps when unset by caller.
+   * Target bitrate for MediaRecorder (bits/sec).
+   * Defaults ~1.2 Mbps video when unset.
    */
   bitsPerSecond?: number;
   /** Called when the next chunk is ready – usually upload to object storage */
-  onChunk?: (info: { blob: Blob; sequence: number; track: RecordingTrack; startedAt: string; endedAt: string }) => void | Promise<void>;
+  onChunk?: (info: {
+    blob: Blob;
+    sequence: number;
+    track: RecordingTrack;
+    startedAt: string;
+    endedAt: string;
+    mimeType: string;
+    settings?: MediaTrackSettings | null;
+  }) => void | Promise<void>;
 }
 
-/** VP8 first — consecutive WebM timeslice blobs concatenate more reliably for server merge. */
+/**
+ * Codec preference: probe AV1 → VP9 → VP8 → generic webm/mp4.
+ * Default list still prefers VP8 first for concat reliability unless caller passes PREFERRED_RECORDING_MIMES.
+ */
 const DEFAULT_MIMES = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/webm;codecs=vp9,opus', 'video/mp4'];
 
-function pickMime(list: string[]): string | undefined {
+/** Prefer modern codecs when concat path has been validated for the deployment. */
+export const PREFERRED_RECORDING_MIMES = [
+  'video/webm;codecs=av01,opus',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=vp8,opus',
+  'video/webm',
+  'video/mp4',
+];
+
+/** Keep VP8-first for server byte-concat reliability (plan default). */
+export const CONCAT_SAFE_RECORDING_MIMES = [
+  'video/webm;codecs=vp8,opus',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=av01,opus',
+  'video/webm',
+  'video/mp4',
+];
+
+export function pickMime(list: string[]): string | undefined {
   for (const m of list) {
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported?.(m)) return m;
   }
@@ -39,22 +68,31 @@ export class ChunkedRecorder {
   private currentChunkStart = 0;
   private mimeType = 'video/webm';
   private stopResolve: (() => void) | null = null;
+  private videoSettings: MediaTrackSettings | null = null;
 
   constructor(private readonly opts: ChunkedRecorderOptions) {}
 
   start(stream: MediaStream) {
     if (this.recorder) return;
-    const chunkMs = this.opts.chunkMs ?? 10_000;
-    const mime = pickMime(this.opts.mimeTypes ?? DEFAULT_MIMES);
+    const chunkMs = this.opts.chunkMs ?? 5_000;
+    const mime = pickMime(this.opts.mimeTypes ?? CONCAT_SAFE_RECORDING_MIMES);
     this.mimeType = mime || 'video/webm';
-    const defaultBps = this.opts.track === 'screen' ? 1_200_000 : 900_000;
+    this.videoSettings = stream.getVideoTracks()[0]?.getSettings?.() || null;
+    const defaultBps = 1_200_000;
     const bitsPerSecond = this.opts.bitsPerSecond ?? defaultBps;
-    const recOpts: MediaRecorderOptions = mime ? { mimeType: mime, bitsPerSecond } : { bitsPerSecond };
+    const recOpts: MediaRecorderOptions = mime
+      ? { mimeType: mime, bitsPerSecond, audioBitsPerSecond: 64_000 }
+      : { bitsPerSecond, audioBitsPerSecond: 64_000 };
     try {
       this.recorder = new MediaRecorder(stream, recOpts);
     } catch {
-      // Some browsers reject bitsPerSecond with certain codecs — fall back to mime-only.
-      this.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      try {
+        this.recorder = mime
+          ? new MediaRecorder(stream, { mimeType: mime, bitsPerSecond })
+          : new MediaRecorder(stream, { bitsPerSecond });
+      } catch {
+        this.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      }
     }
     this.currentChunkStart = Date.now();
     this.recorder.ondataavailable = async (e) => {
@@ -71,6 +109,8 @@ export class ChunkedRecorder {
           track: this.opts.track,
           startedAt,
           endedAt: new Date(endedAt).toISOString(),
+          mimeType: blob.type || this.mimeType,
+          settings: this.videoSettings,
         });
       } catch {
         /* one bad upload should not kill the recorder */
@@ -127,6 +167,8 @@ export interface ChunkSignalerOptions {
   maxBytes?: number;
   /** Send only metadata, no binary payload */
   metadataOnly?: boolean;
+  /** Extra metadata merged into each chunk (e.g. actual width/height/fps) */
+  extraMetadata?: Record<string, unknown>;
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -152,15 +194,20 @@ export function buildChunkSignaler(
     track,
     startedAt,
     endedAt,
+    mimeType,
+    settings,
   }: {
     blob: Blob;
     sequence: number;
     track: RecordingTrack;
     startedAt: string;
     endedAt: string;
+    mimeType?: string;
+    settings?: MediaTrackSettings | null;
   }) => {
     const sendBinary = !opts.metadataOnly && blob.size > 0 && blob.size <= maxBytes;
     const payload_base64 = sendBinary ? await blobToBase64(blob) : undefined;
+    const mime = mimeType || blob.type || 'video/webm';
     await client.postRecordingChunk(sessionId, {
       track,
       sequence,
@@ -168,8 +215,16 @@ export function buildChunkSignaler(
       duration_ms: Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime()),
       started_at: startedAt,
       ended_at: endedAt,
-      mime_type: blob.type || 'video/webm',
-      metadata: { mime: blob.type, persisted: sendBinary },
+      mime_type: mime,
+      metadata: {
+        mime,
+        persisted: sendBinary,
+        width: settings?.width,
+        height: settings?.height,
+        fps: settings?.frameRate,
+        variant: 'segment',
+        ...(opts.extraMetadata || {}),
+      },
       payload_base64,
     });
   };

@@ -68,12 +68,26 @@ export async function completeMediaChunk(tenantId, sessionId, body) {
   const index = Number.isFinite(Number(body?.index)) ? Number(body.index) : 0;
   const object_key = body?.object_key;
   if (!object_key) fail(422, 'object_key is required');
-  return insertRecordingChunk(tenantId, sessionId, {
+  const row = await insertRecordingChunk(tenantId, sessionId, {
     track,
     sequence: index,
     object_key,
     mime_type: body?.mime_type || 'video/webm',
-    metadata: { idempotency_key: body?.idempotency_key, upload: isObjectStorage() ? 's3' : 'local' },
+    metadata: { idempotency_key: body?.idempotency_key, upload: isObjectStorage() ? 's3' : 'local', variant: 'segment' },
     bytes: body?.bytes || null,
   });
+  try {
+    const { emitMetric } = await import('../observability/aggregator.js');
+    emitMetric({
+      tenant_id: tenantId,
+      service_name: 'media',
+      metric_name: 'chunks_uploaded',
+      metric_value: 1,
+      operation_name: 'chunk_complete',
+      workload_type: track,
+    });
+  } catch {
+    /* ignore */
+  }
+  return row;
 }

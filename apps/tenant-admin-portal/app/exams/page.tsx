@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
-  Button,
   Card,
   DataTable,
   DEFAULT_PAGE_SIZE,
@@ -17,7 +16,6 @@ import {
 } from '@proctorshield/ui-components';
 import { AuthGuard } from '@/components/AuthGuard';
 import { TenantAdminShell } from '@/components/TenantAdminShell';
-import { ExamFormModal } from '@/components/ExamFormModal';
 import { api, qs, type ExamRow, type Paged } from '@/lib/tenantApi';
 import { relativeTime } from '@/lib/format';
 
@@ -36,7 +34,6 @@ export default function ExamsPage() {
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [modal, setModal] = useState(false);
   const [limit, setLimit] = useState(DEFAULT_PAGE_SIZE);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -68,21 +65,12 @@ export default function ExamsPage() {
     return () => clearTimeout(t);
   }, [load, q]);
 
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('new') === '1') setModal(true);
-  }, []);
-
   return (
     <AuthGuard>
       <TenantAdminShell>
         <PageHeader
           title="Exams"
-          description="Exam contexts group proctoring sessions. They are created automatically by your integration (by external exam ID) or by candidate links, and can be added here."
-          actions={
-            <Button variant="primary" icon="plus" onClick={() => setModal(true)}>
-              New exam
-            </Button>
-          }
+          description="Exam contexts group proctoring sessions. They are created automatically by your integration (by external exam ID) or by candidate links."
         />
         <Card>
           <Toolbar>
@@ -96,12 +84,7 @@ export default function ExamsPage() {
               <EmptyState
                 icon="exam"
                 title={q ? 'No exams match your search' : 'No exams yet'}
-                description="Start a session from your assessment platform via the Integration API, share a candidate link, or create an exam here."
-                action={
-                  <Button variant="primary" icon="plus" onClick={() => setModal(true)}>
-                    New exam
-                  </Button>
-                }
+                description="Start a session from your assessment platform via the Integration API, or share a candidate link."
               />
             }
           >
@@ -146,14 +129,6 @@ export default function ExamsPage() {
             onLoadMore={() => void load(true, cursor)}
           />
         </Card>
-        <ExamFormModal
-          open={modal}
-          onClose={() => setModal(false)}
-          onSaved={(exam) => {
-            setModal(false);
-            router.push(`/exams/${exam.id}`);
-          }}
-        />
       </TenantAdminShell>
     </AuthGuard>
   );

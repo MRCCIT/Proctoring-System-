@@ -78,6 +78,7 @@ export default function SessionDetailPage() {
   const [session, setSession] = useState<SessionRow | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [evidence, setEvidence] = useState<Evidence | null>(null);
+  const [compressBusy, setCompressBusy] = useState(false);
   const [history, setHistory] = useState<ReviewHistoryRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -128,6 +129,18 @@ export default function SessionDetailPage() {
       if (!opts?.soft) setErr((e as Error).message);
     }
   }, [id]);
+
+  const retryCompress = useCallback(async () => {
+    setCompressBusy(true);
+    try {
+      await api('POST', `/v1/sessions/${id}/recordings/compress`, { force: true });
+      await loadEvidence({ soft: true });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCompressBusy(false);
+    }
+  }, [id, loadEvidence]);
 
   useEffect(() => {
     void loadCore();
@@ -516,9 +529,18 @@ export default function SessionDetailPage() {
 
         {tab === 'evidence' && (
           <>
-            <Card title="Recordings" flush>
+            <Card
+              title="Recordings"
+              description="Compressed playback is preferred when ready; originals are retained."
+              actions={
+                <Button size="sm" variant="secondary" disabled={compressBusy} onClick={() => void retryCompress()}>
+                  {compressBusy ? 'Queuing…' : 'Retry compress'}
+                </Button>
+              }
+              flush
+            >
               <DataTable
-                headers={['Track', 'File', 'Started', 'Size', '']}
+                headers={['Track', 'Source', 'Status', 'Duration', 'Size', 'Savings', '']}
                 isEmpty={!evidence?.recordings.length}
                 empty="No recordings uploaded for this session."
               >
@@ -527,9 +549,19 @@ export default function SessionDetailPage() {
                     <Td>
                       <Badge tone="brand">{r.track}</Badge>
                     </Td>
-                    <Td mono>{r.display_name}</Td>
-                    <Td muted>{formatDateTime(r.started_at)}</Td>
-                    <Td muted>{r.bytes ? `${(r.bytes / 1024 / 1024).toFixed(1)} MB` : '—'}</Td>
+                    <Td mono>
+                      {r.preferred_source || r.variant || '—'}
+                      {r.codec ? ` · ${r.codec}` : ''}
+                    </Td>
+                    <Td muted>{r.compression_status || '—'}</Td>
+                    <Td muted>{r.duration_ms != null ? formatDuration(Math.round(r.duration_ms / 1000)) : '—'}</Td>
+                    <Td muted>
+                      {r.bytes ? `${(r.bytes / 1024 / 1024).toFixed(1)} MB` : '—'}
+                      {r.sources?.original?.bytes != null && r.sources.original.bytes !== r.bytes
+                        ? ` / orig ${(r.sources.original.bytes / 1024 / 1024).toFixed(1)} MB`
+                        : ''}
+                    </Td>
+                    <Td muted>{r.savings_percent != null ? `${r.savings_percent}%` : '—'}</Td>
                     <Td align="right">
                       {r.url && (
                         <Button size="sm" icon="download" href={r.url}>
